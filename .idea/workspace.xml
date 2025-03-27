@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ChangeListManager">
-    <list default="true" id="727eadfe-952c-4cec-b26e-7ad887fa5ab4" name="Changes" comment="" />
+    <list default="true" id="c50022dd-9374-4534-bb1d-fba187fd8640" name="Changes" comment="">
+      <change beforePath="$PROJECT_DIR$/.idea/Real-Time Collaborative Text Editor.iml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/modules.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" />
+    </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -14,7 +20,7 @@
   "customColor": "",
   "associatedIndex": 0
 }]]></component>
-  <component name="ProjectId" id="2uuLbB38AOFWpSEIKtKreEKknPH" />
+  <component name="ProjectId" id="2uuMORaK9IuXFDC3auDfR4WmAZz" />
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
@@ -30,11 +36,11 @@
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
-      <changelist id="727eadfe-952c-4cec-b26e-7ad887fa5ab4" name="Changes" comment="" />
-      <created>1743093582515</created>
+      <changelist id="c50022dd-9374-4534-bb1d-fba187fd8640" name="Changes" comment="" />
+      <created>1743093973680</created>
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
-      <updated>1743093582515</updated>
+      <updated>1743093973680</updated>
     </task>
     <servers />
   </component>
