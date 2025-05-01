@@ -1,12 +1,19 @@
-package org.client.ui;
+package ui;
 
 import javafx.application.Application;
+import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
-import javafx.scene.layout.*;
-import javafx.stage.*;
+import javafx.scene.layout.BorderPane;
+import javafx.scene.layout.HBox;
+import javafx.scene.layout.VBox;
+import javafx.stage.FileChooser;
+import javafx.stage.Stage;
 
-import java.io.*;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
 
 public class CollaborativeEditorUI extends Application {
 
@@ -118,9 +125,32 @@ public class CollaborativeEditorUI extends Application {
             }
         }
     }
+    public void updateEditorContent(String content) {
+        // Run on JavaFX application thread to avoid threading issues
+        javafx.application.Platform.runLater(() -> {
+            // Save current caret position and scroll position
+            int caretPosition = editorArea.getCaretPosition();
+            double scrollTop = editorArea.getScrollTop();
+
+            // Update the content
+            editorArea.setText(content);
+
+            // Restore caret position if possible
+            if (caretPosition <= content.length()) {
+                editorArea.positionCaret(caretPosition);
+            } else {
+                // If content is shorter than previous caret position, move to end
+                editorArea.positionCaret(content.length());
+            }
+
+            // Restore scroll position
+            editorArea.setScrollTop(scrollTop);
+        });
+    }
 
     public static void main(String[] args) {
         launch(args);
     }
+
 }
 

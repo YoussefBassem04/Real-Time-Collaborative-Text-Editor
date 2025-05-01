@@ -1,9 +1,9 @@
-package org.client.net;
+package net;
 
 
 
 import javafx.application.Platform;
-import org.client.ui.CollaborativeEditorUI;
+import ui.CollaborativeEditorUI;
 
 public class MessageHandler {
 

@@ -1,4 +1,4 @@
-package org.client.model;
+package model;
 
 
 
