@@ -7,6 +7,7 @@ import javafx.scene.control.TextArea;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import org.example.crdt.Operation;
+import org.example.crdt.TreeBasedCRDT;
 import org.example.model.EditorMessage;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.simp.stomp.*;
@@ -14,6 +15,7 @@ import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.messaging.WebSocketStompClient;
 
 import java.lang.reflect.Type;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EditorClient extends Application {
@@ -23,6 +25,8 @@ public class EditorClient extends Application {
     private final String username = "user-" + (int)(Math.random() * 1000);
     private final AtomicBoolean isProcessingRemoteUpdate = new AtomicBoolean(false);
 
+    private final TreeBasedCRDT localDoc = new TreeBasedCRDT();
+
     @Override
     public void start(Stage primaryStage) {
         initializeUI(primaryStage);
@@ -31,9 +35,11 @@ public class EditorClient extends Application {
 
     private void initializeUI(Stage stage) {
         textArea = new TextArea();
-        textArea.textProperty().addListener((obs, oldVal, newVal) -> {
+        textArea.setWrapText(true);
+
+        textArea.textProperty().addListener((obs, oldText, newText) -> {
             if (!isProcessingRemoteUpdate.get()) {
-                handleLocalTextChange(oldVal, newVal);
+                handleLocalTextChange(oldText, newText);
             }
         });
 
@@ -50,14 +56,14 @@ public class EditorClient extends Application {
 
         stompClient.connect("ws://localhost:8080/ws", new StompSessionHandlerAdapter() {
             @Override
-            public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
+            public void afterConnected(StompSession session, StompHeaders headers) {
                 stompSession = session;
 
-                // Subscribe to document updates
+                // Subscriptions
                 session.subscribe("/topic/document/" + documentId + "/operations", this);
                 session.subscribe("/topic/document/" + documentId + "/users", this);
 
-                // Join the document
+                // Join document
                 EditorMessage joinMessage = new EditorMessage();
                 joinMessage.setType(EditorMessage.MessageType.USER_JOIN);
                 joinMessage.setSender(username);
@@ -67,8 +73,9 @@ public class EditorClient extends Application {
 
             @Override
             public void handleFrame(StompHeaders headers, Object payload) {
-                EditorMessage message = (EditorMessage) payload;
-                Platform.runLater(() -> handleIncomingMessage(message));
+                if (payload instanceof EditorMessage msg) {
+                    Platform.runLater(() -> handleIncomingMessage(msg));
+                }
             }
 
             @Override
@@ -79,64 +86,74 @@ public class EditorClient extends Application {
     }
 
     private void handleLocalTextChange(String oldText, String newText) {
-        // Calculate difference between old and new text
         if (newText.length() > oldText.length()) {
-            // Insertion occurred
-            int pos = 0;
-            while (pos < oldText.length() && oldText.charAt(pos) == newText.charAt(pos)) {
-                pos++;
-            }
-            char insertedChar = newText.charAt(pos);
-            sendInsertOperation(pos, insertedChar);
+            // Insertion
+            int index = findDiffIndex(oldText, newText);
+            char inserted = newText.charAt(index);
+            sendInsertOperation(index, inserted);
         } else if (newText.length() < oldText.length()) {
-            // Deletion occurred
-            int pos = 0;
-            while (pos < newText.length() && oldText.charAt(pos) == newText.charAt(pos)) {
-                pos++;
-            }
-            sendDeleteOperation(pos);
+            // Deletion
+            int index = findDiffIndex(newText, oldText);
+            sendDeleteOperation(index);
         }
+    }
+
+    private int findDiffIndex(String shorter, String longer) {
+        int index = 0;
+        while (index < shorter.length() && shorter.charAt(index) == longer.charAt(index)) {
+            index++;
+        }
+        return index;
     }
 
     private void sendInsertOperation(int position, char value) {
         if (stompSession != null && stompSession.isConnected()) {
+            // Always attach to root for simplicity
+            Operation op = localDoc.insert(username, value, "root");
+
             EditorMessage message = new EditorMessage();
             message.setType(EditorMessage.MessageType.OPERATION);
             message.setSender(username);
             message.setDocumentId(documentId);
-            // Here you would create a proper Operation object using your CRDT
+            message.setOperation(op);
+
             stompSession.send("/app/editor/" + documentId + "/operation", message);
         }
     }
 
-    private void sendDeleteOperation(int position) {
+    private void sendDeleteOperation(int index) {
         if (stompSession != null && stompSession.isConnected()) {
-            EditorMessage message = new EditorMessage();
-            message.setType(EditorMessage.MessageType.OPERATION);
-            message.setSender(username);
-            message.setDocumentId(documentId);
-            // Here you would create a proper Operation object using your CRDT
-            stompSession.send("/app/editor/" + documentId + "/operation", message);
+            List<String> ids = localDoc.getNodeIds();
+            if (index >= 0 && index < ids.size()) {
+                String targetId = ids.get(index);
+                Operation op = localDoc.delete(targetId);
+                if (op != null) {
+                    EditorMessage message = new EditorMessage();
+                    message.setType(EditorMessage.MessageType.OPERATION);
+                    message.setSender(username);
+                    message.setDocumentId(documentId);
+                    message.setOperation(op);
+
+                    stompSession.send("/app/editor/" + documentId + "/operation", message);
+                }
+            }
         }
     }
 
     private void handleIncomingMessage(EditorMessage message) {
-        if (message == null) return;
-
         switch (message.getType()) {
             case OPERATION:
                 isProcessingRemoteUpdate.set(true);
-                // Apply remote operation to textArea
-                // You would use your CRDT here to apply the operation
+                localDoc.apply(message.getOperation());
+                textArea.setText(localDoc.getText());
+                textArea.positionCaret(localDoc.getText().length());
                 isProcessingRemoteUpdate.set(false);
                 break;
-
             case USER_LIST:
-                System.out.println("Users in document: " + message.getContent());
+                System.out.println("Users in room: " + message.getContent());
                 break;
-
             default:
-                System.out.println("Received message of type: " + message.getType());
+                System.out.println("Unhandled message type: " + message.getType());
         }
     }
 
