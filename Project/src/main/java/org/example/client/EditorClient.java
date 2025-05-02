@@ -1,163 +1,225 @@
 package org.example.client;
 
-import javafx.application.Application;
-import javafx.application.Platform;
-import javafx.scene.Scene;
-import javafx.scene.control.TextArea;
-import javafx.scene.layout.VBox;
-import javafx.stage.Stage;
 import org.example.crdt.Operation;
-import org.example.crdt.TreeBasedCRDT;
 import org.example.model.EditorMessage;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
-import org.springframework.messaging.simp.stomp.*;
+import org.springframework.messaging.simp.stomp.StompFrameHandler;
+import org.springframework.messaging.simp.stomp.StompHeaders;
+import org.springframework.messaging.simp.stomp.StompSession;
+import org.springframework.messaging.simp.stomp.StompSessionHandlerAdapter;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.messaging.WebSocketStompClient;
+import org.springframework.web.socket.sockjs.client.SockJsClient;
+import org.springframework.web.socket.sockjs.client.Transport;
+import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.KeyAdapter;
+import java.awt.event.KeyEvent;
 import java.lang.reflect.Type;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 
-public class EditorClient extends Application {
-    private TextArea textArea;
+public class EditorClient {
+    private JFrame frame;
+    private JTextArea textArea;
     private StompSession stompSession;
-    private final String documentId = "default-doc";
-    private final String username = "user-" + (int)(Math.random() * 1000);
-    private final AtomicBoolean isProcessingRemoteUpdate = new AtomicBoolean(false);
+    private String clientId;
+    private int cursorPosition;
+    private boolean isProcessingRemoteOperation;
 
-    private final TreeBasedCRDT localDoc = new TreeBasedCRDT();
-
-    @Override
-    public void start(Stage primaryStage) {
-        initializeUI(primaryStage);
-        connectToWebSocketServer();
+    public EditorClient() {
+        this.clientId = UUID.randomUUID().toString();
+        this.cursorPosition = 0;
+        this.isProcessingRemoteOperation = false;
+        initializeUI();
+        connectToWebSocket();
     }
 
-    private void initializeUI(Stage stage) {
-        textArea = new TextArea();
-        textArea.setWrapText(true);
+    private void initializeUI() {
+        frame = new JFrame("Collaborative Editor - " + clientId.substring(0, 8));
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setSize(800, 600);
 
-        textArea.textProperty().addListener((obs, oldText, newText) -> {
-            if (!isProcessingRemoteUpdate.get()) {
-                handleLocalTextChange(oldText, newText);
+        textArea = new JTextArea();
+        textArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
+        textArea.setLineWrap(true);
+        textArea.setWrapStyleWord(true);
+
+        textArea.addKeyListener(new KeyAdapter() {
+            @Override
+            public void keyTyped(KeyEvent e) {
+                if (!isProcessingRemoteOperation) {
+                    handleLocalEdit(e.getKeyChar());
+                }
+            }
+
+            @Override
+            public void keyPressed(KeyEvent e) {
+                if (e.getKeyCode() == KeyEvent.VK_BACK_SPACE && !isProcessingRemoteOperation) {
+                    handleLocalDelete();
+                }
             }
         });
 
-        VBox root = new VBox(textArea);
-        Scene scene = new Scene(root, 800, 600);
-        stage.setTitle("Collaborative Editor - " + username);
-        stage.setScene(scene);
-        stage.show();
+        JScrollPane scrollPane = new JScrollPane(textArea);
+        frame.add(scrollPane, BorderLayout.CENTER);
+        frame.setVisible(true);
     }
 
-    private void connectToWebSocketServer() {
-        WebSocketStompClient stompClient = new WebSocketStompClient(new StandardWebSocketClient());
+    private void connectToWebSocket() {
+        List<Transport> transports = new ArrayList<>();
+        transports.add(new WebSocketTransport(new StandardWebSocketClient()));
+        WebSocketStompClient stompClient = new WebSocketStompClient(new SockJsClient(transports));
         stompClient.setMessageConverter(new MappingJackson2MessageConverter());
 
         stompClient.connect("ws://localhost:8080/ws", new StompSessionHandlerAdapter() {
             @Override
-            public void afterConnected(StompSession session, StompHeaders headers) {
+            public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
+                System.out.println("✅ Connected to WebSocket");
+
                 stompSession = session;
 
-                // Subscriptions
-                session.subscribe("/topic/document/" + documentId + "/operations", this);
-                session.subscribe("/topic/document/" + documentId + "/users", this);
+                session.subscribe("/topic/editor", new StompFrameHandler() {
+                    @Override
+                    public Type getPayloadType(StompHeaders headers) {
+                        return EditorMessage.class;
+                    }
 
-                // Join document
-                EditorMessage joinMessage = new EditorMessage();
-                joinMessage.setType(EditorMessage.MessageType.USER_JOIN);
-                joinMessage.setSender(username);
-                joinMessage.setDocumentId(documentId);
-                session.send("/app/editor/" + documentId + "/join", joinMessage);
+                    @Override
+                    public void handleFrame(StompHeaders headers, Object payload) {
+                        EditorMessage msg = (EditorMessage) payload;
+                        System.out.println("⇦ [topic/editor] Received: " + msg);
+                        handleRemoteMessage(msg);
+                    }
+                });
+
+                EditorMessage syncRequest = new EditorMessage();
+                syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
+                syncRequest.setClientId(clientId); // send client ID for tracking if needed
+                session.send("/app/editor/operation", syncRequest);
             }
 
             @Override
-            public void handleFrame(StompHeaders headers, Object payload) {
-                if (payload instanceof EditorMessage msg) {
-                    Platform.runLater(() -> handleIncomingMessage(msg));
-                }
-            }
-
-            @Override
-            public Type getPayloadType(StompHeaders headers) {
-                return EditorMessage.class;
+            public void handleTransportError(StompSession session, Throwable exception) {
+                System.err.println("❌ Transport error: " + exception.getMessage());
+                exception.printStackTrace();
             }
         });
     }
 
-    private void handleLocalTextChange(String oldText, String newText) {
-        if (newText.length() > oldText.length()) {
-            // Insertion
-            int index = findDiffIndex(oldText, newText);
-            char inserted = newText.charAt(index);
-            sendInsertOperation(index, inserted);
-        } else if (newText.length() < oldText.length()) {
-            // Deletion
-            int index = findDiffIndex(newText, oldText);
-            sendDeleteOperation(index);
-        }
+    private void handleLocalEdit(char c) {
+        String content = String.valueOf(c);
+        List<String> path = calculatePathForPosition(cursorPosition);
+
+        EditorMessage message = new EditorMessage();
+        message.setType(EditorMessage.MessageType.OPERATION);
+        message.setClientId(clientId);
+        message.setOperation(new Operation(Operation.Type.INSERT, content, path, System.currentTimeMillis(), clientId));
+        stompSession.send("/app/editor/operation", message);
+
+        cursorPosition++;
     }
 
-    private int findDiffIndex(String shorter, String longer) {
-        int index = 0;
-        while (index < shorter.length() && shorter.charAt(index) == longer.charAt(index)) {
-            index++;
-        }
-        return index;
+    private void handleLocalDelete() {
+        if (cursorPosition == 0) return;
+
+        List<String> path = calculatePathForPosition(cursorPosition - 1);
+        String contentToDelete = textArea.getText().substring(cursorPosition - 1, cursorPosition);
+
+        EditorMessage message = new EditorMessage();
+        message.setType(EditorMessage.MessageType.OPERATION);
+        message.setClientId(clientId);
+        message.setOperation(new Operation(Operation.Type.DELETE, contentToDelete, path, System.currentTimeMillis(), clientId));
+        stompSession.send("/app/editor/operation", message);
+
+        cursorPosition--;
     }
 
-    private void sendInsertOperation(int position, char value) {
-        if (stompSession != null && stompSession.isConnected()) {
-            // Always attach to root for simplicity
-            Operation op = localDoc.insert(username, value, "root");
+    // Only the changes shown below
+private void handleRemoteMessage(EditorMessage message) {
+    SwingUtilities.invokeLater(() -> {
+        if (message.getType() == EditorMessage.MessageType.OPERATION &&
+            !message.getOperation().getClientId().equals(clientId)) {  // ⬅️ Ignore own ops
+            isProcessingRemoteOperation = true;
 
-            EditorMessage message = new EditorMessage();
-            message.setType(EditorMessage.MessageType.OPERATION);
-            message.setSender(username);
-            message.setDocumentId(documentId);
-            message.setOperation(op);
+            Operation op = message.getOperation();
+            int pos = calculatePositionFromPath(op.getPath());
 
-            stompSession.send("/app/editor/" + documentId + "/operation", message);
-        }
-    }
-
-    private void sendDeleteOperation(int index) {
-        if (stompSession != null && stompSession.isConnected()) {
-            List<String> ids = localDoc.getNodeIds();
-            if (index >= 0 && index < ids.size()) {
-                String targetId = ids.get(index);
-                Operation op = localDoc.delete(targetId);
-                if (op != null) {
-                    EditorMessage message = new EditorMessage();
-                    message.setType(EditorMessage.MessageType.OPERATION);
-                    message.setSender(username);
-                    message.setDocumentId(documentId);
-                    message.setOperation(op);
-
-                    stompSession.send("/app/editor/" + documentId + "/operation", message);
+            if (op.getType() == Operation.Type.INSERT) {
+                textArea.insert(op.getContent(), pos);
+                if (pos <= cursorPosition) {
+                    cursorPosition += op.getContent().length();
+                }
+            } else if (op.getType() == Operation.Type.DELETE) {
+                String currentText = textArea.getText();
+                if (pos >= 0 && pos < currentText.length()) {
+                    int endPos = Math.min(pos + op.getContent().length(), currentText.length());
+                    String toDelete = currentText.substring(pos, endPos);
+                    if (toDelete.equals(op.getContent())) {
+                        textArea.replaceRange("", pos, endPos);
+                        if (pos < cursorPosition) {
+                            cursorPosition = Math.max(0, cursorPosition - op.getContent().length());
+                        }
+                    }
                 }
             }
+            isProcessingRemoteOperation = false;
+        } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
+            textArea.setText(message.getContent());
+            textArea.setCaretPosition(cursorPosition);
         }
+    });
+}
+
+
+
+    private List<String> calculatePathForPosition(int position) {
+        List<String> path = new ArrayList<>();
+        String document = textArea.getText();
+
+        if (position == 0) path.add("start");
+        else if (position >= document.length()) path.add("end");
+        else {
+            path.add("after-" + (int) document.charAt(position - 1));
+            path.add("before-" + (int) document.charAt(position));
+        }
+
+        return path;
     }
 
-    private void handleIncomingMessage(EditorMessage message) {
-        switch (message.getType()) {
-            case OPERATION:
-                isProcessingRemoteUpdate.set(true);
-                localDoc.apply(message.getOperation());
-                textArea.setText(localDoc.getText());
-                textArea.positionCaret(localDoc.getText().length());
-                isProcessingRemoteUpdate.set(false);
-                break;
-            case USER_LIST:
-                System.out.println("Users in room: " + message.getContent());
-                break;
-            default:
-                System.out.println("Unhandled message type: " + message.getType());
+    private int calculatePositionFromPath(List<String> path) {
+        String document = textArea.getText();
+        if (path.contains("start")) return 0;
+        if (path.contains("end")) return document.length();
+
+        for (int i = 0; i < document.length(); i++) {
+            boolean matches = true;
+            for (String segment : path) {
+                if (segment.startsWith("after-")) {
+                    int charCode = Integer.parseInt(segment.substring(6));
+                    if (i == 0 || (int) document.charAt(i - 1) != charCode) {
+                        matches = false;
+                        break;
+                    }
+                } else if (segment.startsWith("before-")) {
+                    int charCode = Integer.parseInt(segment.substring(7));
+                    if (i >= document.length() || (int) document.charAt(i) != charCode) {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            if (matches) return i;
         }
+
+        return document.length();
     }
 
     public static void main(String[] args) {
-        launch(args);
+        SwingUtilities.invokeLater(EditorClient::new);
     }
 }

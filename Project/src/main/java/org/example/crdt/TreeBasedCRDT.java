@@ -1,131 +1,146 @@
 package org.example.crdt;
 
-import java.util.*;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 
 public class TreeBasedCRDT {
-    public static class CharNode {
-        public final String id;
-        public final char value;
-        public final String parentId;
-        public final List<String> children;
-        public boolean deleted;
-
-        public CharNode(String id, char value, String parentId) {
-            this.id = id;
-            this.value = value;
-            this.parentId = parentId;
-            this.children = new ArrayList<>();
-            this.deleted = false;
-        }
-    }
-
-    private final Map<String, CharNode> nodes = new HashMap<>();
-    private final String rootId = "root";
-    private int logicalClock = 0;
-    private final Stack<Operation> undoStack = new Stack<>();
-    private final Stack<Operation> redoStack = new Stack<>();
+    private TreeNode root;
+    private String replicaId;
 
     public TreeBasedCRDT() {
-        nodes.put(rootId, new CharNode(rootId, '\0', null));
+        this.root = new TreeNode("root");
+        this.replicaId = UUID.randomUUID().toString();
     }
 
-    private String generateId(String userId) {
-        return userId + ":" + (logicalClock++);
-    }
+    public synchronized void applyOperation(Operation operation) {
+        List<String> fullPath = operation.getPath();
+        List<String> parentPath = fullPath.subList(0, fullPath.size() - 1); // Trim last element
 
-    public Operation insert(String userId, char value, String parentId) {
-        String id = generateId(userId);
-        CharNode parent = nodes.getOrDefault(parentId, nodes.get(rootId));
-        CharNode newNode = new CharNode(id, value, parent.id);
-        parent.children.add(id);
-        nodes.put(id, newNode);
-        Operation op = new Operation(Operation.Type.INSERT, id, value, parent.id);
-        undoStack.push(op);
-        redoStack.clear();
-        return op;
-    }
+        TreeNode parent = findParentNode(parentPath);
 
-    public Operation delete(String id) {
-        CharNode node = nodes.get(id);
-        if (node != null && !node.deleted) {
-            node.deleted = true;
-            Operation op = new Operation(Operation.Type.DELETE, id, node.value, node.parentId);
-            undoStack.push(op);
-            redoStack.clear();
-            return op;
+        if (parent == null) {
+            System.err.println("Could not find parent node for path: " + parentPath);
+            return;
         }
-        return null;
-    }
 
-    public void apply(Operation op) {
-        switch (op.type) {
-            case INSERT:
-                if (!nodes.containsKey(op.id)) {
-                    CharNode parent = nodes.getOrDefault(op.parentId, nodes.get(rootId));
-                    CharNode newNode = new CharNode(op.id, op.value, op.parentId);
-                    parent.children.add(op.id);
-                    nodes.put(op.id, newNode);
-                }
-                break;
-            case DELETE:
-                CharNode node = nodes.get(op.id);
-                if (node != null) node.deleted = true;
-                break;
+        if (operation.getType() == Operation.Type.INSERT) {
+            TreeNode newNode = new TreeNode(operation.getContent());
+            newNode.setTimestamp(operation.getTimestamp());
+            newNode.setClientId(operation.getClientId());
+            parent.addChild(newNode);
+        } else if (operation.getType() == Operation.Type.DELETE) {
+            parent.removeChild(operation.getContent());
         }
     }
 
-    public void undo() {
-        if (!undoStack.isEmpty()) {
-            Operation op = undoStack.pop();
-            redoStack.push(op);
-            if (op.type == Operation.Type.INSERT) {
-                nodes.get(op.id).deleted = true;
-            } else if (op.type == Operation.Type.DELETE) {
-                nodes.get(op.id).deleted = false;
-            }
-        }
+
+    public Operation generateInsertOp(String content, List<String> path, String clientId) {
+        long timestamp = System.currentTimeMillis();
+        return new Operation(Operation.Type.INSERT, content, path, timestamp, clientId);
     }
 
-    public void redo() {
-        if (!redoStack.isEmpty()) {
-            Operation op = redoStack.pop();
-            undoStack.push(op);
-            if (op.type == Operation.Type.INSERT) {
-                nodes.get(op.id).deleted = false;
-            } else if (op.type == Operation.Type.DELETE) {
-                nodes.get(op.id).deleted = true;
-            }
-        }
+    public Operation generateDeleteOp(String content, List<String> path, String clientId) {
+        long timestamp = System.currentTimeMillis();
+        return new Operation(Operation.Type.DELETE, content, path, timestamp, clientId);
     }
 
     public String getText() {
         StringBuilder sb = new StringBuilder();
-        traverse(rootId, sb);
+        traverseTree(root, sb);
         return sb.toString();
     }
-    public List<String> getNodeIds() {
-        List<String> ids = new ArrayList<>();
-        collectVisibleIds(rootId, ids);
-        return ids;
+
+    public Map<String, Object> getDocumentState() {
+        Map<String, Object> state = new HashMap<>();
+        state.put("text", getText());
+        state.put("structure", getTreeStructure(root));
+        return state;
     }
 
-    private void collectVisibleIds(String nodeId, List<String> ids) {
-        for (String childId : nodes.get(nodeId).children) {
-            CharNode child = nodes.get(childId);
-            if (!child.deleted) {
-                ids.add(child.id);
+    private TreeNode findParentNode(List<String> path) {
+        TreeNode current = root;
+
+        for (String pathElement : path) {
+            if (pathElement.equals("root")) continue; // skip redundant match to self
+
+            boolean found = false;
+            for (TreeNode child : current.getChildren()) {
+                if (child.getValue().equals(pathElement)) {
+                    current = child;
+                    found = true;
+                    break;
+                }
             }
-            collectVisibleIds(childId, ids);
+            if (!found) return null;
+        }
+        return current;
+    }
+
+    private void traverseTree(TreeNode node, StringBuilder sb) {
+        if (!node.getValue().equals("root")) {
+            sb.append(node.getValue());
+        }
+        for (TreeNode child : node.getChildren()) {
+            traverseTree(child, sb);
         }
     }
 
-    private void traverse(String nodeId, StringBuilder sb) {
-        for (String childId : nodes.get(nodeId).children) {
-            CharNode child = nodes.get(childId);
-            if (!child.deleted) {
-                sb.append(child.value);
-            }
-            traverse(childId, sb);
+    private Map<String, Object> getTreeStructure(TreeNode node) {
+        Map<String, Object> nodeInfo = new HashMap<>();
+        nodeInfo.put("value", node.getValue());
+        nodeInfo.put("timestamp", node.getTimestamp());
+        nodeInfo.put("clientId", node.getClientId());
+
+        List<Map<String, Object>> children = new ArrayList<>();
+        for (TreeNode child : node.getChildren()) {
+            children.add(getTreeStructure(child));
         }
+
+        if (!children.isEmpty()) {
+            nodeInfo.put("children", children);
+        }
+
+        return nodeInfo;
+    }
+
+    private static class TreeNode implements Comparable<TreeNode> {
+        private String value;
+        private List<TreeNode> children;
+        private long timestamp;
+        private String clientId;
+
+        public TreeNode(String value) {
+            this.value = value;
+            this.children = new ArrayList<>();
+            this.timestamp = System.currentTimeMillis();
+            this.clientId = UUID.randomUUID().toString();
+        }
+
+        public void addChild(TreeNode node) {
+            children.add(node);
+            children.sort(TreeNode::compareTo);
+        }
+
+        public void removeChild(String value) {
+            children.removeIf(node -> node.getValue().equals(value));
+        }
+
+        @Override
+        public int compareTo(TreeNode other) {
+            if (this.timestamp != other.timestamp) {
+                return Long.compare(this.timestamp, other.timestamp);
+            }
+            return this.clientId.compareTo(other.clientId);
+        }
+
+        public String getValue() { return value; }
+        public List<TreeNode> getChildren() { return children; }
+        public long getTimestamp() { return timestamp; }
+        public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+        public String getClientId() { return clientId; }
+        public void setClientId(String clientId) { this.clientId = clientId; }
     }
 }

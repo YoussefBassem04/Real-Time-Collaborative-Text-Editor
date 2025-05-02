@@ -16,6 +16,7 @@ module org.example.collaborativeeditor {
     // Jackson
     requires com.fasterxml.jackson.databind;
     requires com.fasterxml.jackson.core;
+    requires java.desktop;
 
     // Open packages for Spring reflection
     opens org.example to spring.core, spring.beans, spring.context, spring.web;
@@ -23,6 +24,7 @@ module org.example.collaborativeeditor {
     opens org.example.controller to spring.web;
     opens org.example.config to spring.core;
     opens org.example.service to spring.beans;
+    opens org.example.crdt to com.fasterxml.jackson.databind;
     opens org.example.model to spring.core, com.fasterxml.jackson.databind;
 
     // Export public API
@@ -32,4 +34,5 @@ module org.example.collaborativeeditor {
     exports org.example.config;
     exports org.example.service;
     exports org.example.model;
+    exports org.example.crdt;
 }
