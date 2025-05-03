@@ -2,14 +2,10 @@ package org.example.crdt;
 
 import java.io.Serializable;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
-/**
- * Represents a position in a document using a path in the CRDT tree.
- * The position is defined by a list of identifiers (path) that uniquely
- * locate a character in the CRDT tree.
- */
 public class Position implements Serializable, Comparable<Position> {
 
     private static final long serialVersionUID = 1L;
@@ -105,7 +101,7 @@ public class Position implements Serializable, Comparable<Position> {
      * @return The path as a list of identifiers
      */
     public List<Identifier> getPath() {
-        return new ArrayList<>(path);
+        return Collections.unmodifiableList(path);  // Making path unmodifiable
     }
 
     /**

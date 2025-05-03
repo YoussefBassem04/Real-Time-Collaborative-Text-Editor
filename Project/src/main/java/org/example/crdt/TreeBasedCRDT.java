@@ -1,146 +1,277 @@
 package org.example.crdt;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
+/**
+ * A tree-based CRDT implementation for a collaborative text editor.
+ * This CRDT uses a tree structure to maintain character positions and
+ * ensure consistent document state across distributed clients.
+ */
 public class TreeBasedCRDT {
-    private TreeNode root;
-    private String replicaId;
+    // The base character to position map
+    private final TreeMap<Position, Character> characters;
+    // The current document content as a string (for faster access)
+    private String cachedContent;
+    // The client ID that owns this CRDT instance
+    private final String clientId;
+    // Strategy value for position generation
+    private static final int STRATEGY_BOUNDARY = 10;
 
-    public TreeBasedCRDT() {
-        this.root = new TreeNode("root");
-        this.replicaId = UUID.randomUUID().toString();
+    /**
+     * Creates a new tree-based CRDT with the specified client ID
+     *
+     * @param clientId The unique client identifier
+     */
+    public TreeBasedCRDT(String clientId) {
+        this.characters = new TreeMap<>();
+        this.clientId = clientId;
+        this.cachedContent = "";
     }
 
-    public synchronized void applyOperation(Operation operation) {
-        List<String> fullPath = operation.getPath();
-        List<String> parentPath = fullPath.subList(0, fullPath.size() - 1); // Trim last element
+    /**
+     * Inserts a character at the specified index position
+     *
+     * @param index The index to insert at
+     * @param c     The character to insert
+     * @return The operation representing this insertion
+     */
+    public Operation insert(int index, char c) {
+        Position position = generatePositionBetween(index);
+        characters.put(position, c);
+        rebuildCache();
 
-        TreeNode parent = findParentNode(parentPath);
+        return new Operation(
+                Operation.Type.INSERT,
+                String.valueOf(c),
+                positionToPathList(position),
+                System.currentTimeMillis(),
+                clientId
+        );
+    }
 
-        if (parent == null) {
-            System.err.println("Could not find parent node for path: " + parentPath);
-            return;
+    /**
+     * Deletes a character at the specified index position
+     *
+     * @param index The index to delete from
+     * @return The operation representing this deletion
+     */
+    public Operation delete(int index) {
+        if (index < 0 || index >= cachedContent.length()) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
         }
+
+        Position position = getPositionAt(index);
+        char deletedChar = characters.remove(position);
+        rebuildCache();
+
+        return new Operation(
+                Operation.Type.DELETE,
+                String.valueOf(deletedChar),
+                positionToPathList(position),
+                System.currentTimeMillis(),
+                clientId
+        );
+    }
+
+    /**
+     * Applies a remote operation to this CRDT
+     *
+     * @param operation The operation to apply
+     * @return True if the operation was successfully applied
+     */
+    public boolean applyOperation(Operation operation) {
+        Position position = pathListToPosition(operation.getPath());
 
         if (operation.getType() == Operation.Type.INSERT) {
-            TreeNode newNode = new TreeNode(operation.getContent());
-            newNode.setTimestamp(operation.getTimestamp());
-            newNode.setClientId(operation.getClientId());
-            parent.addChild(newNode);
+            if (operation.getContent().length() != 1) {
+                // For simplicity, we only handle single character operations
+                return false;
+            }
+            characters.put(position, operation.getContent().charAt(0));
+            rebuildCache();
+            return true;
         } else if (operation.getType() == Operation.Type.DELETE) {
-            parent.removeChild(operation.getContent());
+            if (characters.containsKey(position)) {
+                characters.remove(position);
+                rebuildCache();
+                return true;
+            }
         }
+        return false;
     }
 
-
-    public Operation generateInsertOp(String content, List<String> path, String clientId) {
-        long timestamp = System.currentTimeMillis();
-        return new Operation(Operation.Type.INSERT, content, path, timestamp, clientId);
+    /**
+     * Gets the current document content
+     *
+     * @return The document content as a string
+     */
+    public String getContent() {
+        return cachedContent;
     }
 
-    public Operation generateDeleteOp(String content, List<String> path, String clientId) {
-        long timestamp = System.currentTimeMillis();
-        return new Operation(Operation.Type.DELETE, content, path, timestamp, clientId);
-    }
-
-    public String getText() {
+    /**
+     * Rebuilds the cached content string from the characters map
+     */
+    private void rebuildCache() {
         StringBuilder sb = new StringBuilder();
-        traverseTree(root, sb);
-        return sb.toString();
+        for (Character c : characters.values()) {
+            sb.append(c);
+        }
+        this.cachedContent = sb.toString();
     }
 
-    public Map<String, Object> getDocumentState() {
-        Map<String, Object> state = new HashMap<>();
-        state.put("text", getText());
-        state.put("structure", getTreeStructure(root));
-        return state;
+    /**
+     * Generates a position between the positions at index-1 and index
+     *
+     * @param index The index to generate a position for
+     * @return The new position
+     */
+    private Position generatePositionBetween(int index) {
+        if (index < 0 || index > cachedContent.length()) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
+        }
+
+        Position before = null;
+        Position after = null;
+
+        if (index == 0) {
+            // Special case: inserting at the beginning
+            if (characters.isEmpty()) {
+                return new Position().append(STRATEGY_BOUNDARY, clientId);
+            } else {
+                after = characters.firstKey();
+            }
+        } else if (index == cachedContent.length()) {
+            // Special case: inserting at the end
+            before = characters.lastKey();
+        } else {
+            // Inserting in the middle
+            List<Position> positions = new ArrayList<>(characters.keySet());
+            before = positions.get(index - 1);
+            after = positions.get(index);
+        }
+
+        return generatePositionBetween(before, after);
     }
 
-    private TreeNode findParentNode(List<String> path) {
-        TreeNode current = root;
+    /**
+     * Generates a position between two positions
+     *
+     * @param before The position before
+     * @param after  The position after (may be null)
+     * @return A new position between the two
+     */
+    private Position generatePositionBetween(Position before, Position after) {
+        if (before == null && after == null) {
+            // Create a new position with a default value
+            return new Position().append(STRATEGY_BOUNDARY, clientId);
+        }
 
-        for (String pathElement : path) {
-            if (pathElement.equals("root")) continue; // skip redundant match to self
+        if (before == null) {
+            // Generate a position before the first position
+            int pos = after.getPath().get(0).getPosition() / 2;
+            return new Position().append(pos, clientId);
+        }
 
-            boolean found = false;
-            for (TreeNode child : current.getChildren()) {
-                if (child.getValue().equals(pathElement)) {
-                    current = child;
-                    found = true;
-                    break;
+        if (after == null) {
+            // Generate a position after the last position
+            int pos = before.getPath().get(0).getPosition() + STRATEGY_BOUNDARY;
+            return new Position().append(pos, clientId);
+        }
+
+        // Find the common ancestor path
+        List<Position.Identifier> beforePath = before.getPath();
+        List<Position.Identifier> afterPath = after.getPath();
+
+        int minLength = Math.min(beforePath.size(), afterPath.size());
+        int divergeIndex = 0;
+
+        while (divergeIndex < minLength &&
+                beforePath.get(divergeIndex).equals(afterPath.get(divergeIndex))) {
+            divergeIndex++;
+        }
+
+        if (divergeIndex < minLength) {
+            // Different identifiers at divergeIndex
+            Position.Identifier beforeId = beforePath.get(divergeIndex);
+            Position.Identifier afterId = afterPath.get(divergeIndex);
+
+            if (afterId.getPosition() - beforeId.getPosition() > 1) {
+                // There's room between the values
+                int pos = beforeId.getPosition() +
+                        (afterId.getPosition() - beforeId.getPosition()) / 2;
+
+                // Create new position with shared prefix and new identifier
+                Position newPos = new Position();
+                for (int i = 0; i < divergeIndex; i++) {
+                    newPos = newPos.append(
+                            beforePath.get(i).getPosition(),
+                            beforePath.get(i).getClientId()
+                    );
                 }
+                return newPos.append(pos, clientId);
             }
-            if (!found) return null;
         }
-        return current;
+
+        // Either paths are identical up to one's end, or consecutive positions
+        // Append to the longer path or to before if they're the same length
+        Position newPos = new Position(new ArrayList<>(beforePath));
+        return newPos.append(STRATEGY_BOUNDARY, clientId);
     }
 
-    private void traverseTree(TreeNode node, StringBuilder sb) {
-        if (!node.getValue().equals("root")) {
-            sb.append(node.getValue());
+    /**
+     * Gets the position at the specified index
+     *
+     * @param index The index to get the position for
+     * @return The position at the index
+     */
+    private Position getPositionAt(int index) {
+        if (index < 0 || index >= cachedContent.length()) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
         }
-        for (TreeNode child : node.getChildren()) {
-            traverseTree(child, sb);
-        }
+
+        List<Position> positions = new ArrayList<>(characters.keySet());
+        return positions.get(index);
     }
 
-    private Map<String, Object> getTreeStructure(TreeNode node) {
-        Map<String, Object> nodeInfo = new HashMap<>();
-        nodeInfo.put("value", node.getValue());
-        nodeInfo.put("timestamp", node.getTimestamp());
-        nodeInfo.put("clientId", node.getClientId());
+    /**
+     * Converts a path list from the Operation to a Position object
+     *
+     * @param pathList The path list from the operation
+     * @return The corresponding Position object
+     */
+    private Position pathListToPosition(List<String> pathList) {
+        // This is a sample implementation - you should adapt this
+        // to fit your specific path encoding strategy
+        Position position = new Position();
 
-        List<Map<String, Object>> children = new ArrayList<>();
-        for (TreeNode child : node.getChildren()) {
-            children.add(getTreeStructure(child));
-        }
-
-        if (!children.isEmpty()) {
-            nodeInfo.put("children", children);
-        }
-
-        return nodeInfo;
-    }
-
-    private static class TreeNode implements Comparable<TreeNode> {
-        private String value;
-        private List<TreeNode> children;
-        private long timestamp;
-        private String clientId;
-
-        public TreeNode(String value) {
-            this.value = value;
-            this.children = new ArrayList<>();
-            this.timestamp = System.currentTimeMillis();
-            this.clientId = UUID.randomUUID().toString();
-        }
-
-        public void addChild(TreeNode node) {
-            children.add(node);
-            children.sort(TreeNode::compareTo);
-        }
-
-        public void removeChild(String value) {
-            children.removeIf(node -> node.getValue().equals(value));
-        }
-
-        @Override
-        public int compareTo(TreeNode other) {
-            if (this.timestamp != other.timestamp) {
-                return Long.compare(this.timestamp, other.timestamp);
+        for (String pathElement : pathList) {
+            if (pathElement.contains(":")) {
+                String[] parts = pathElement.split(":");
+                int pos = Integer.parseInt(parts[0]);
+                String id = parts[1];
+                position = position.append(pos, id);
             }
-            return this.clientId.compareTo(other.clientId);
         }
 
-        public String getValue() { return value; }
-        public List<TreeNode> getChildren() { return children; }
-        public long getTimestamp() { return timestamp; }
-        public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
-        public String getClientId() { return clientId; }
-        public void setClientId(String clientId) { this.clientId = clientId; }
+        return position;
+    }
+
+    /**
+     * Converts a Position object to a path list for an Operation
+     *
+     * @param position The position to convert
+     * @return The path list for the operation
+     */
+    private List<String> positionToPathList(Position position) {
+        // This is a sample implementation - you should adapt this
+        // to fit your specific path encoding strategy
+        List<String> pathList = new ArrayList<>();
+
+        for (Position.Identifier identifier : position.getPath()) {
+            pathList.add(identifier.getPosition() + ":" + identifier.getClientId());
+        }
+
+        return pathList;
     }
 }

@@ -5,7 +5,6 @@ import org.example.service.CollaborationService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.event.EventListener;
 import org.springframework.messaging.handler.annotation.MessageMapping;
-import org.springframework.messaging.handler.annotation.SendTo;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
@@ -29,23 +28,27 @@ public class EditorWebSocketController {
         System.out.println("▶ Received: " + message.getType() +
                 (message.getOperation() != null ?
                         " " + message.getOperation().getType() + " '" + message.getOperation().getContent() + "'" :
-                        " content: " + message.getContent()));
+                        " content: " + message.getContent()) +
+                " for document: " + message.getDocumentId());
 
-        switch (message.getType()) {
-            case OPERATION:
-                EditorMessage processedMessage = collaborationService.processMessage(message);
-                if (processedMessage != null) {
-                    messagingTemplate.convertAndSend("/topic/editor", processedMessage);
-                }
-                break;
+        EditorMessage processedMessage = collaborationService.processMessage(message);
+        if (processedMessage != null) {
+            String documentId = processedMessage.getDocumentId();
+            if (documentId == null || documentId.isEmpty()) {
+                documentId = "default";
+            }
 
-            case SYNC_REQUEST:
-                EditorMessage syncResponse = collaborationService.processMessage(message);
-                messagingTemplate.convertAndSend("/topic/editor", syncResponse); // optionally broadcast to all
-                break;
-
-            default:
-                break;
+            // Send to document-specific topic
+            String destination = "/topic/editor/" + documentId;
+            messagingTemplate.convertAndSend(destination, processedMessage);
+            System.out.println("◀ Sent to: " + destination);
         }
+    }
+
+    @EventListener
+    public void handleSessionDisconnect(SessionDisconnectEvent event) {
+        SimpMessageHeaderAccessor headers = SimpMessageHeaderAccessor.wrap(event.getMessage());
+        String clientId = headers.getSessionId();
+        collaborationService.handleClientDisconnect(clientId);
     }
 }
