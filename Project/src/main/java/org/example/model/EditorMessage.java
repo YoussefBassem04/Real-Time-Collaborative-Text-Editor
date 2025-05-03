@@ -2,19 +2,21 @@ package org.example.model;
 
 import org.example.crdt.Operation;
 
-public class EditorMessage {
-    public enum MessageType {
-        OPERATION,
-        SYNC_REQUEST,
-        SYNC_RESPONSE
-    }
+import java.util.List;
 
+public class EditorMessage {
     private MessageType type;
     private String clientId;
-    private String content;
-    private Operation operation;
     private String documentId;
+    private Operation operation;
+    private String content;
+    private List<String> characterIds; // Add this field
 
+    public enum MessageType {
+        OPERATION, SYNC_REQUEST, SYNC_RESPONSE
+    }
+
+    // Getters and setters
     public MessageType getType() {
         return type;
     }
@@ -31,12 +33,12 @@ public class EditorMessage {
         this.clientId = clientId;
     }
 
-    public String getContent() {
-        return content;
+    public String getDocumentId() {
+        return documentId;
     }
 
-    public void setContent(String content) {
-        this.content = content;
+    public void setDocumentId(String documentId) {
+        this.documentId = documentId;
     }
 
     public Operation getOperation() {
@@ -47,12 +49,20 @@ public class EditorMessage {
         this.operation = operation;
     }
 
-    public String getDocumentId() {
-        return documentId;
+    public String getContent() {
+        return content;
     }
 
-    public void setDocumentId(String documentId) {
-        this.documentId = documentId;
+    public void setContent(String content) {
+        this.content = content;
+    }
+
+    public List<String> getCharacterIds() {
+        return characterIds;
+    }
+
+    public void setCharacterIds(List<String> characterIds) {
+        this.characterIds = characterIds;
     }
 
     @Override
@@ -60,9 +70,10 @@ public class EditorMessage {
         return "EditorMessage{" +
                 "type=" + type +
                 ", clientId='" + clientId + '\'' +
-                ", content='" + (content != null ? (content.length() > 20 ? content.substring(0, 20) + "..." : content) : null) + '\'' +
-                ", operation=" + operation +
                 ", documentId='" + documentId + '\'' +
+                ", operation=" + operation +
+                ", content='" + content + '\'' +
+                ", characterIds=" + characterIds +
                 '}';
     }
 }
