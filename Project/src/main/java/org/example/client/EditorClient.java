@@ -19,9 +19,8 @@ import javax.swing.event.DocumentListener;
 import javax.swing.text.BadLocationException;
 import java.awt.*;
 import java.lang.reflect.Type;
-import java.util.ArrayList;
+import java.util.*;
 import java.util.List;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 public class EditorClient {
@@ -32,25 +31,23 @@ public class EditorClient {
     private String documentId;
     private AtomicBoolean isProcessingRemoteOperation = new AtomicBoolean(false);
     private final Object documentLock = new Object();
+    private String previousContent = "";
+    // Store character IDs for CRDT (e.g., ["client1:1234567890", "client1:1234567891", ...])
+    private List<String> characterIds = new ArrayList<>();
 
     public EditorClient() {
-        // Get client ID and document ID from user
         initializeClientInfo();
         initializeUI();
         connectToWebSocket();
     }
 
     private void initializeClientInfo() {
-        // Create a panel for user input
         JPanel panel = new JPanel(new GridLayout(0, 1));
-
-        // Create input field for document ID
         JTextField docIdField = new JTextField(10);
-        docIdField.setText("default"); // Default document ID
+        docIdField.setText("default");
         panel.add(new JLabel("Enter document ID to join:"));
         panel.add(docIdField);
 
-        // Create options for client ID: generate new or enter existing
         JRadioButton newIdButton = new JRadioButton("Generate new client ID");
         JRadioButton existingIdButton = new JRadioButton("Use existing client ID");
         ButtonGroup group = new ButtonGroup();
@@ -61,17 +58,14 @@ public class EditorClient {
         panel.add(newIdButton);
         panel.add(existingIdButton);
 
-        // Create field for entering existing client ID
         JTextField clientIdField = new JTextField(20);
         clientIdField.setEnabled(false);
         panel.add(new JLabel("Enter existing client ID:"));
         panel.add(clientIdField);
 
-        // Enable/disable client ID field based on radio button selection
         newIdButton.addActionListener(e -> clientIdField.setEnabled(false));
         existingIdButton.addActionListener(e -> clientIdField.setEnabled(true));
 
-        // Show dialog to user
         int result = JOptionPane.showConfirmDialog(null, panel,
                 "Collaborative Editor Settings", JOptionPane.OK_CANCEL_OPTION);
 
@@ -79,13 +73,11 @@ public class EditorClient {
             System.exit(0);
         }
 
-        // Set document ID from user input
         this.documentId = docIdField.getText().trim();
         if (this.documentId.isEmpty()) {
             this.documentId = "default";
         }
 
-        // Set client ID based on user selection
         if (newIdButton.isSelected()) {
             this.clientId = UUID.randomUUID().toString();
         } else {
@@ -107,7 +99,6 @@ public class EditorClient {
         textArea.setLineWrap(true);
         textArea.setWrapStyleWord(true);
 
-        // Use Document listener instead of KeyListener for better event handling
         textArea.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
@@ -126,7 +117,6 @@ public class EditorClient {
             @Override
             public void removeUpdate(DocumentEvent e) {
                 if (!isProcessingRemoteOperation.get()) {
-                    // For delete operations
                     int offset = e.getOffset();
                     int length = e.getLength();
                     handleLocalDelete(offset, length);
@@ -140,8 +130,6 @@ public class EditorClient {
         });
 
         JScrollPane scrollPane = new JScrollPane(textArea);
-
-        // Create status panel at bottom
         JPanel statusPanel = new JPanel(new BorderLayout());
         JLabel statusLabel = new JLabel(" Connected as: " + clientId.substring(0, 8) + " | Document: " + documentId);
         statusPanel.add(statusLabel, BorderLayout.WEST);
@@ -161,10 +149,8 @@ public class EditorClient {
             @Override
             public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
                 System.out.println("✅ Connected to WebSocket");
-
                 stompSession = session;
 
-                // Subscribe to specific document topic
                 String topic = "/topic/editor/" + documentId;
                 session.subscribe(topic, new StompFrameHandler() {
                     @Override
@@ -180,7 +166,6 @@ public class EditorClient {
                     }
                 });
 
-                // Send sync request with document ID and client ID
                 EditorMessage syncRequest = new EditorMessage();
                 syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
                 syncRequest.setClientId(clientId);
@@ -193,7 +178,6 @@ public class EditorClient {
             public void handleTransportError(StompSession session, Throwable exception) {
                 System.err.println("❌ Transport error: " + exception.getMessage());
                 exception.printStackTrace();
-
                 SwingUtilities.invokeLater(() -> {
                     JOptionPane.showMessageDialog(frame,
                             "Connection error: " + exception.getMessage(),
@@ -206,82 +190,131 @@ public class EditorClient {
 
     private void handleLocalInsert(String text, int position) {
         synchronized (documentLock) {
-            List<String> path = calculatePathForPosition(position);
+            try {
+                // Generate a unique ID for each character
+                List<String> charIds = new ArrayList<>();
+                for (int i = 0; i < text.length(); i++) {
+                    charIds.add(clientId + ":" + System.currentTimeMillis() + ":" + i);
+                }
 
-            EditorMessage message = new EditorMessage();
-            message.setType(EditorMessage.MessageType.OPERATION);
-            message.setClientId(clientId);
-            message.setDocumentId(documentId);
-            message.setOperation(new Operation(Operation.Type.INSERT, text, path, System.currentTimeMillis(), clientId));
-            
-            System.out.println("⇨ Sending INSERT operation: " + text + " at position " + position);
-            stompSession.send("/app/editor/operation", message);
+                // Calculate path using character IDs
+                List<String> path = calculatePathForPosition(position);
+
+                EditorMessage message = new EditorMessage();
+                message.setType(EditorMessage.MessageType.OPERATION);
+                message.setClientId(clientId);
+                message.setDocumentId(documentId);
+                message.setOperation(new Operation(Operation.Type.INSERT, text, path, System.currentTimeMillis(), clientId));
+
+                // Update local state
+                characterIds.addAll(position, charIds);
+                previousContent = textArea.getText();
+
+                System.out.println("⇨ Sending INSERT operation: " + text + " at position " + position +
+                        ", Path: " + path + ", Char IDs: " + charIds);
+                stompSession.send("/app/editor/operation", message);
+            } catch (Exception e) {
+                System.err.println("Error handling insert: " + e.getMessage());
+                e.printStackTrace();
+            }
         }
     }
 
     private void handleLocalDelete(int position, int length) {
         synchronized (documentLock) {
-            // We need to get the content that was deleted
-            // Since it's already gone from the textArea, we can't directly access it
-            // This is a limitation of our current approach
-            
-            // For simplicity, we'll send a delete operation with the length
-            // and assume the server state matches our local state
-            List<String> path = calculatePathForPosition(position);
+            try {
+                String deletedContent = "";
+                if (position >= 0 && position < previousContent.length()) {
+                    int endPos = Math.min(position + length, previousContent.length());
+                    deletedContent = previousContent.substring(position, endPos);
+                }
 
-            EditorMessage message = new EditorMessage();
-            message.setType(EditorMessage.MessageType.OPERATION);
-            message.setClientId(clientId);
-            message.setDocumentId(documentId);
-            message.setOperation(new Operation(Operation.Type.DELETE, " ".repeat(length), path, System.currentTimeMillis(), clientId));
-            
-            System.out.println("⇨ Sending DELETE operation at position " + position + " length " + length);
-            stompSession.send("/app/editor/operation", message);
+                List<String> path = calculatePathForPosition(position);
+
+                EditorMessage message = new EditorMessage();
+                message.setType(EditorMessage.MessageType.OPERATION);
+                message.setClientId(clientId);
+                message.setDocumentId(documentId);
+                message.setOperation(new Operation(Operation.Type.DELETE, deletedContent, path, System.currentTimeMillis(), clientId));
+
+                // Update local state
+                characterIds.subList(position, position + length).clear();
+                previousContent = textArea.getText();
+
+                System.out.println("⇨ Sending DELETE operation at position " + position +
+                        ", deleted: '" + deletedContent + "', Path: " + path);
+                stompSession.send("/app/editor/operation", message);
+            } catch (Exception e) {
+                System.err.println("Error handling delete: " + e.getMessage());
+                e.printStackTrace();
+            }
         }
     }
 
     private void handleRemoteMessage(EditorMessage message) {
-        // Verify the message is for our document
-        if (!documentId.equals(message.getDocumentId())) {
-            return; // Ignore messages for other documents
-        }
+        if (!documentId.equals(message.getDocumentId())) return;
 
         SwingUtilities.invokeLater(() -> {
             synchronized (documentLock) {
                 try {
-                    // Set flag to prevent our document listener from firing
                     isProcessingRemoteOperation.set(true);
-                
-                    if (message.getType() == EditorMessage.MessageType.OPERATION && 
-                            !message.getOperation().getClientId().equals(clientId)) {  // Don't process own ops
+                    int caretPos = textArea.getCaretPosition();
+
+                    if (message.getType() == EditorMessage.MessageType.OPERATION &&
+                            !message.getOperation().getClientId().equals(clientId)) {
                         Operation op = message.getOperation();
-                        int pos = calculatePositionFromPath(op.getPath());
-                
-                        if (op.getType() == Operation.Type.INSERT) {
-                            // Insert the content at the calculated position
-                            textArea.insert(op.getContent(), pos);
-                            System.out.println("Applied remote INSERT at position " + pos + ": '" + op.getContent() + "'");
-                        } else if (op.getType() == Operation.Type.DELETE) {
-                            // Delete content at the calculated position
-                            int endPos = Math.min(pos + op.getContent().length(), textArea.getDocument().getLength());
+                        // Transform operation if needed (basic OT for concurrent inserts)
+                        Operation transformedOp = transformOperation(op);
+                        int pos = calculatePositionFromPath(transformedOp.getPath());
+
+                        System.out.println("Applying remote operation: " + transformedOp.getType() +
+                                ", Content: " + transformedOp.getContent() +
+                                ", Path: " + transformedOp.getPath() +
+                                ", Position: " + pos +
+                                ", Document: " + textArea.getText());
+
+                        if (transformedOp.getType() == Operation.Type.INSERT) {
+                            // Generate character IDs for inserted text
+                            List<String> charIds = new ArrayList<>();
+                            for (int i = 0; i < transformedOp.getContent().length(); i++) {
+                                charIds.add(transformedOp.getClientId() + ":" + transformedOp.getTimestamp() + ":" + i);
+                            }
+                            textArea.insert(transformedOp.getContent(), pos);
+                            characterIds.addAll(pos, charIds);
+                            if (pos <= caretPos) {
+                                textArea.setCaretPosition(caretPos + transformedOp.getContent().length());
+                            }
+                        } else if (transformedOp.getType() == Operation.Type.DELETE) {
+                            int endPos = Math.min(pos + transformedOp.getContent().length(), textArea.getDocument().getLength());
                             textArea.replaceRange("", pos, endPos);
-                            System.out.println("Applied remote DELETE at position " + pos + " to " + endPos);
+                            characterIds.subList(pos, endPos).clear();
+                            if (pos < caretPos) {
+                                textArea.setCaretPosition(Math.max(pos, caretPos - (endPos - pos)));
+                            }
                         }
+                        previousContent = textArea.getText();
                     } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
-                        // Set the entire document content
                         String content = message.getContent();
-                        if (content != null) {
+                        // Apply sync incrementally to preserve cursor
+                        if (content != null && !content.equals(textArea.getText())) {
                             textArea.setText(content);
-                            System.out.println("Applied SYNC_RESPONSE with content length: " + content.length());
-                        } else {
+                            previousContent = content;
+                            // Rebuild character IDs (simplified; ideally server should provide IDs)
+                            characterIds.clear();
+                            for (int i = 0; i < content.length(); i++) {
+                                characterIds.add("sync:" + i);
+                            }
+                        } else if (content == null) {
                             textArea.setText("");
-                            System.out.println("Applied SYNC_RESPONSE with null content");
+                            previousContent = "";
+                            characterIds.clear();
                         }
-                        // Place cursor at end of document
-                        textArea.setCaretPosition(textArea.getDocument().getLength());
+                        textArea.setCaretPosition(Math.min(caretPos, textArea.getDocument().getLength()));
                     }
+                } catch (Exception e) {
+                    System.err.println("Error handling remote message: " + e.getMessage());
+                    e.printStackTrace();
                 } finally {
-                    // Always reset the flag when done
                     isProcessingRemoteOperation.set(false);
                 }
             }
@@ -290,48 +323,60 @@ public class EditorClient {
 
     private List<String> calculatePathForPosition(int position) {
         List<String> path = new ArrayList<>();
-        String document = textArea.getText();
-
-        if (position == 0) path.add("start");
-        else if (position >= document.length()) path.add("end");
-        else {
-            path.add("after-" + (int) document.charAt(position - 1));
-            if (position < document.length()) {
-                path.add("before-" + (int) document.charAt(position));
+        synchronized (documentLock) {
+            if (position == 0) {
+                path.add("start");
+            } else if (position >= characterIds.size()) {
+                path.add("end");
+            } else {
+                // Use the unique character ID of the previous character
+                path.add("after-" + characterIds.get(position - 1));
             }
         }
-
         return path;
     }
 
     private int calculatePositionFromPath(List<String> path) {
-        if (path == null || path.isEmpty()) return 0;
-        
-        String document = textArea.getText();
-        if (path.contains("start")) return 0;
-        if (path.contains("end")) return document.length();
+        synchronized (documentLock) {
+            if (path == null || path.isEmpty()) return 0;
+            if (path.contains("start")) return 0;
+            if (path.contains("end")) return characterIds.size();
 
-        for (int i = 0; i < document.length(); i++) {
-            boolean matches = true;
-            for (String segment : path) {
-                if (segment.startsWith("after-")) {
-                    int charCode = Integer.parseInt(segment.substring(6));
-                    if (i == 0 || (int) document.charAt(i - 1) != charCode) {
-                        matches = false;
-                        break;
-                    }
-                } else if (segment.startsWith("before-")) {
-                    int charCode = Integer.parseInt(segment.substring(7));
-                    if (i >= document.length() || (int) document.charAt(i) != charCode) {
-                        matches = false;
-                        break;
+            for (int i = 0; i < characterIds.size(); i++) {
+                if (path.contains("after-" + characterIds.get(i))) {
+                    return i + 1;
+                }
+            }
+            // Fallback to end of document
+            return characterIds.size();
+        }
+    }
+
+    private Operation transformOperation(Operation op) {
+        // Basic OT: Adjust position for concurrent inserts at the same position
+        // If two clients insert at the same path, the one with the higher clientId goes after
+        synchronized (documentLock) {
+            if (op.getType() == Operation.Type.INSERT) {
+                List<String> path = op.getPath();
+                int pos = calculatePositionFromPath(path);
+                // Check for recent operations at the same position
+                // (Ideally, maintain a history of operations; simplified here)
+                // If another operation inserted at the same position, shift this one
+                // For simplicity, use clientId to break ties
+                // Note: This is a basic transformation; a full OT system would track all operations
+                for (String id : characterIds.subList(0, Math.min(pos, characterIds.size()))) {
+                    String[] parts = id.split(":");
+                    if (parts.length > 1 && parts[0].compareTo(op.getClientId()) < 0 &&
+                            op.getTimestamp() - Long.parseLong(parts[1]) < 1000) {
+                        // Concurrent insert by a client with lower ID; shift position
+                        List<String> newPath = calculatePathForPosition(pos + 1);
+                        return new Operation(op.getType(), op.getContent(), newPath,
+                                op.getTimestamp(), op.getClientId());
                     }
                 }
             }
-            if (matches) return i;
+            return op;
         }
-
-        return document.length(); // Default to end of document if path can't be resolved
     }
 
     public static void main(String[] args) {

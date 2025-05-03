@@ -9,13 +9,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @Service
 public class CollaborationService {
-    
+
     // Map of documentId -> document content
     private final Map<String, StringBuilder> documentContents = new ConcurrentHashMap<>();
-    
+
     // Map of clientId -> documentId (to track which document each client is editing)
     private final Map<String, String> clientDocumentMap = new ConcurrentHashMap<>();
-    
+
     // Keeping track of all operations for possible conflict resolution
     private final Map<String, java.util.List<Operation>> documentOperations = new ConcurrentHashMap<>();
 
@@ -31,7 +31,7 @@ public class CollaborationService {
             // Track which document this client is editing
             clientDocumentMap.put(clientId, documentId);
         }
-        
+
         // Initialize document content if it doesn't exist
         documentContents.putIfAbsent(documentId, new StringBuilder());
         StringBuilder currentContent = documentContents.get(documentId);
@@ -52,45 +52,62 @@ public class CollaborationService {
                     // Track operation for this document
                     documentOperations.putIfAbsent(documentId, new java.util.ArrayList<>());
                     documentOperations.get(documentId).add(operation);
-                    
+
                     // Apply operation to document state
                     applyOperation(currentContent, operation);
-                    
+
                     // Return the operation message to broadcast to all clients
                     return message;
                 }
                 break;
         }
-        
+
         return null;
     }
 
     private void applyOperation(StringBuilder document, Operation operation) {
         int position = calculatePositionFromPath(document.toString(), operation.getPath());
-        
+
         switch (operation.getType()) {
             case INSERT:
                 if (position >= 0 && position <= document.length()) {
                     document.insert(position, operation.getContent());
-                    System.out.println("Applied INSERT at position " + position + ": '" + 
+                    System.out.println("Applied INSERT at position " + position + ": '" +
                             operation.getContent() + "', Document now: " + document);
                 }
                 break;
-                
+
             case DELETE:
                 if (position >= 0 && position < document.length()) {
-                    int endPos = Math.min(position + operation.getContent().length(), document.length());
-                    document.delete(position, endPos);
-                    System.out.println("Applied DELETE at position " + position + 
-                            ", Document now: " + document);
+                    String contentToDelete = operation.getContent();
+                    int endPos = Math.min(position + contentToDelete.length(), document.length());
+
+                    // Verify the content to delete matches what's actually at that position
+                    String actualContent = document.substring(position, endPos);
+                    if (actualContent.equals(contentToDelete)) {
+                        document.delete(position, endPos);
+                        System.out.println("Applied DELETE at position " + position +
+                                ", deleted: '" + contentToDelete + "', Document now: " + document);
+                    } else {
+                        System.out.println("Warning: Content mismatch for DELETE. Expected: '" +
+                                contentToDelete + "', Actual: '" + actualContent + "'");
+                        // Still delete the content at that position for simplicity
+                        document.delete(position, endPos);
+                        System.out.println("Applied DELETE anyway at position " + position +
+                                ", Document now: " + document);
+                    }
+                } else {
+                    System.out.println("Invalid position for DELETE: " + position +
+                            " (document length: " + document.length() + ")");
                 }
                 break;
         }
+
     }
 
     private int calculatePositionFromPath(String document, java.util.List<String> path) {
         if (path == null || path.isEmpty()) return 0;
-        
+
         if (path.contains("start")) return 0;
         if (path.contains("end")) return document.length();
 

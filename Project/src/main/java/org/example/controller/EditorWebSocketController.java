@@ -42,6 +42,7 @@ public class EditorWebSocketController {
             String destination = "/topic/editor/" + documentId;
             messagingTemplate.convertAndSend(destination, processedMessage);
             System.out.println("◀ Sent to: " + destination);
+            
         }
     }
 

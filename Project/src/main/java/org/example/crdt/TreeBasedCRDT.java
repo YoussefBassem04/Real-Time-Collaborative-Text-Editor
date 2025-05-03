@@ -2,66 +2,53 @@ package org.example.crdt;
 
 import java.util.*;
 
-/**
- * A tree-based CRDT implementation for a collaborative text editor.
- * This CRDT uses a tree structure to maintain character positions and
- * ensure consistent document state across distributed clients.
- */
 public class TreeBasedCRDT {
-    // The base character to position map
-    private final TreeMap<Position, Character> characters;
-    // The current document content as a string (for faster access)
+    private final Map<Position, Character> characters;
+    private final List<Position> positionOrder;
     private String cachedContent;
-    // The client ID that owns this CRDT instance
     private final String clientId;
-    // Strategy value for position generation
-    private static final int STRATEGY_BOUNDARY = 10;
+    private static final int STRATEGY_BOUNDARY = 100;
+    private long operationCounter = 0;
 
-    /**
-     * Creates a new tree-based CRDT with the specified client ID
-     *
-     * @param clientId The unique client identifier
-     */
     public TreeBasedCRDT(String clientId) {
-        this.characters = new TreeMap<>();
+        this.characters = new LinkedHashMap<>();
+        this.positionOrder = new ArrayList<>();
         this.clientId = clientId;
         this.cachedContent = "";
     }
 
-    /**
-     * Inserts a character at the specified index position
-     *
-     * @param index The index to insert at
-     * @param c     The character to insert
-     * @return The operation representing this insertion
-     */
     public Operation insert(int index, char c) {
-        Position position = generatePositionBetween(index);
-        characters.put(position, c);
+        if (index < 0 || index > cachedContent.length()) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
+        }
+
+        Position before = index > 0 ? positionOrder.get(index - 1) : null;
+        Position after = index < positionOrder.size() ? positionOrder.get(index) : null;
+
+        long opId = ++operationCounter;
+        Position newPosition = generatePositionBetween(before, after, opId);
+
+        positionOrder.add(index, newPosition);
+        characters.put(newPosition, c);
         rebuildCache();
 
         return new Operation(
                 Operation.Type.INSERT,
                 String.valueOf(c),
-                positionToPathList(position),
+                positionToPathList(newPosition),
                 System.currentTimeMillis(),
                 clientId
         );
     }
 
-    /**
-     * Deletes a character at the specified index position
-     *
-     * @param index The index to delete from
-     * @return The operation representing this deletion
-     */
     public Operation delete(int index) {
         if (index < 0 || index >= cachedContent.length()) {
             throw new IndexOutOfBoundsException("Index out of bounds: " + index);
         }
 
-        Position position = getPositionAt(index);
+        Position position = positionOrder.get(index);
         char deletedChar = characters.remove(position);
+        positionOrder.remove(index);
         rebuildCache();
 
         return new Operation(
@@ -73,205 +60,194 @@ public class TreeBasedCRDT {
         );
     }
 
-    /**
-     * Applies a remote operation to this CRDT
-     *
-     * @param operation The operation to apply
-     * @return True if the operation was successfully applied
-     */
     public boolean applyOperation(Operation operation) {
         Position position = pathListToPosition(operation.getPath());
 
         if (operation.getType() == Operation.Type.INSERT) {
             if (operation.getContent().length() != 1) {
-                // For simplicity, we only handle single character operations
                 return false;
             }
+
+            if (characters.containsKey(position)) {
+                return false;
+            }
+
+            int insertIndex = findInsertionIndex(position);
+            positionOrder.add(insertIndex, position);
             characters.put(position, operation.getContent().charAt(0));
             rebuildCache();
+            debugPrintStructure();
             return true;
         } else if (operation.getType() == Operation.Type.DELETE) {
             if (characters.containsKey(position)) {
-                characters.remove(position);
-                rebuildCache();
-                return true;
+                int deleteIndex = positionOrder.indexOf(position);
+                if (deleteIndex >= 0) {
+                    positionOrder.remove(deleteIndex);
+                    characters.remove(position);
+                    rebuildCache();
+                    debugPrintStructure();
+                    return true;
+                }
             }
         }
         return false;
     }
 
-    /**
-     * Gets the current document content
-     *
-     * @return The document content as a string
-     */
+    private int findInsertionIndex(Position position) {
+        if (positionOrder.isEmpty()) {
+            return 0;
+        }
+
+        int low = 0;
+        int high = positionOrder.size() - 1;
+
+        while (low <= high) {
+            int mid = (low + high) >>> 1;
+            int midIndex = mid;
+            Position midPos = positionOrder.get(midIndex);
+            int cmp = position.compareTo(midPos);
+
+            if (cmp < 0) {
+                high = mid - 1;
+            } else if (cmp > 0) {
+                low = mid + 1;
+            } else {
+                return mid;
+            }
+        }
+
+        return low;
+    }
+
     public String getContent() {
         return cachedContent;
     }
 
-    /**
-     * Rebuilds the cached content string from the characters map
-     */
     private void rebuildCache() {
         StringBuilder sb = new StringBuilder();
-        for (Character c : characters.values()) {
-            sb.append(c);
+        for (Position pos : positionOrder) {
+            sb.append(characters.get(pos));
         }
         this.cachedContent = sb.toString();
     }
 
-    /**
-     * Generates a position between the positions at index-1 and index
-     *
-     * @param index The index to generate a position for
-     * @return The new position
-     */
-    private Position generatePositionBetween(int index) {
-        if (index < 0 || index > cachedContent.length()) {
-            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
-        }
+    private Position generatePositionBetween(Position before, Position after, long opId) {
+        Position newPos = new Position();
+        String uniqueId = clientId + ":" + opId;
 
-        Position before = null;
-        Position after = null;
-
-        if (index == 0) {
-            // Special case: inserting at the beginning
-            if (characters.isEmpty()) {
-                return new Position().append(STRATEGY_BOUNDARY, clientId);
-            } else {
-                after = characters.firstKey();
-            }
-        } else if (index == cachedContent.length()) {
-            // Special case: inserting at the end
-            before = characters.lastKey();
-        } else {
-            // Inserting in the middle
-            List<Position> positions = new ArrayList<>(characters.keySet());
-            before = positions.get(index - 1);
-            after = positions.get(index);
-        }
-
-        return generatePositionBetween(before, after);
-    }
-
-    /**
-     * Generates a position between two positions
-     *
-     * @param before The position before
-     * @param after  The position after (may be null)
-     * @return A new position between the two
-     */
-    private Position generatePositionBetween(Position before, Position after) {
         if (before == null && after == null) {
-            // Create a new position with a default value
-            return new Position().append(STRATEGY_BOUNDARY, clientId);
+            // Empty document
+            return newPos.append(STRATEGY_BOUNDARY, uniqueId);
         }
 
         if (before == null) {
-            // Generate a position before the first position
-            int pos = after.getPath().get(0).getPosition() / 2;
-            return new Position().append(pos, clientId);
-        }
-
-        if (after == null) {
-            // Generate a position after the last position
-            int pos = before.getPath().get(0).getPosition() + STRATEGY_BOUNDARY;
-            return new Position().append(pos, clientId);
-        }
-
-        // Find the common ancestor path
-        List<Position.Identifier> beforePath = before.getPath();
-        List<Position.Identifier> afterPath = after.getPath();
-
-        int minLength = Math.min(beforePath.size(), afterPath.size());
-        int divergeIndex = 0;
-
-        while (divergeIndex < minLength &&
-                beforePath.get(divergeIndex).equals(afterPath.get(divergeIndex))) {
-            divergeIndex++;
-        }
-
-        if (divergeIndex < minLength) {
-            // Different identifiers at divergeIndex
-            Position.Identifier beforeId = beforePath.get(divergeIndex);
-            Position.Identifier afterId = afterPath.get(divergeIndex);
-
-            if (afterId.getPosition() - beforeId.getPosition() > 1) {
-                // There's room between the values
-                int pos = beforeId.getPosition() +
-                        (afterId.getPosition() - beforeId.getPosition()) / 2;
-
-                // Create new position with shared prefix and new identifier
-                Position newPos = new Position();
-                for (int i = 0; i < divergeIndex; i++) {
-                    newPos = newPos.append(
-                            beforePath.get(i).getPosition(),
-                            beforePath.get(i).getClientId()
-                    );
-                }
-                return newPos.append(pos, clientId);
+            // Insert at start
+            int afterPos = after.getPath().get(0).getPosition();
+            if (afterPos > 1) {
+                return newPos.append(afterPos / 2, uniqueId);
+            } else {
+                return newPos.append(0, uniqueId);
             }
         }
 
-        // Either paths are identical up to one's end, or consecutive positions
-        // Append to the longer path or to before if they're the same length
-        Position newPos = new Position(new ArrayList<>(beforePath));
-        return newPos.append(STRATEGY_BOUNDARY, clientId);
-    }
-
-    /**
-     * Gets the position at the specified index
-     *
-     * @param index The index to get the position for
-     * @return The position at the index
-     */
-    private Position getPositionAt(int index) {
-        if (index < 0 || index >= cachedContent.length()) {
-            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
+        if (after == null) {
+            // Insert at end
+            int beforePos = before.getPath().get(before.getPath().size() - 1).getPosition();
+            return newPos.append(beforePos + STRATEGY_BOUNDARY, uniqueId);
         }
 
-        List<Position> positions = new ArrayList<>(characters.keySet());
-        return positions.get(index);
+        // Insert between two positions
+        List<Position.Identifier> beforePath = before.getPath();
+        List<Position.Identifier> afterPath = after.getPath();
+        int commonPrefix = 0;
+        int minLength = Math.min(beforePath.size(), afterPath.size());
+
+        while (commonPrefix < minLength &&
+                beforePath.get(commonPrefix).getPosition() == afterPath.get(commonPrefix).getPosition()) {
+            commonPrefix++;
+        }
+
+        // Copy common prefix
+        for (int i = 0; i < commonPrefix; i++) {
+            Position.Identifier id = beforePath.get(i);
+            newPos = newPos.append(id.getPosition(), id.getClientId());
+        }
+
+        if (commonPrefix < beforePath.size() && commonPrefix < afterPath.size()) {
+            // Paths diverge
+            int beforePos = beforePath.get(commonPrefix).getPosition();
+            int afterPos = afterPath.get(commonPrefix).getPosition();
+            if (afterPos - beforePos > 1) {
+                // Room to insert between
+                int newPosValue = beforePos + (afterPos - beforePos) / 2;
+                return newPos.append(newPosValue, uniqueId);
+            } else {
+                // No room, extend path
+                return newPos.append(beforePos + 1, uniqueId);
+            }
+        } else if (beforePath.size() > commonPrefix) {
+            // Before path is longer
+            int beforePos = beforePath.get(commonPrefix).getPosition();
+            return newPos.append(beforePos + 1, uniqueId);
+        } else if (afterPath.size() > commonPrefix) {
+            // After path is longer
+            int afterPos = afterPath.get(commonPrefix).getPosition();
+            if (afterPos > 1) {
+                return newPos.append(afterPos / 2, uniqueId);
+            } else {
+                return newPos.append(0, uniqueId);
+            }
+        } else {
+            // Paths are equal up to common prefix, extend with new position
+            return newPos.append(STRATEGY_BOUNDARY, uniqueId);
+        }
     }
 
-    /**
-     * Converts a path list from the Operation to a Position object
-     *
-     * @param pathList The path list from the operation
-     * @return The corresponding Position object
-     */
+    private Position copyPathUntil(List<Position.Identifier> path, int length) {
+        Position newPos = new Position();
+        for (int i = 0; i < Math.min(length, path.size()); i++) {
+            Position.Identifier id = path.get(i);
+            newPos = newPos.append(id.getPosition(), id.getClientId());
+        }
+        return newPos;
+    }
+
     private Position pathListToPosition(List<String> pathList) {
-        // This is a sample implementation - you should adapt this
-        // to fit your specific path encoding strategy
         Position position = new Position();
 
         for (String pathElement : pathList) {
-            if (pathElement.contains(":")) {
-                String[] parts = pathElement.split(":");
-                int pos = Integer.parseInt(parts[0]);
-                String id = parts[1];
-                position = position.append(pos, id);
+            String[] parts = pathElement.split(":", 2);
+            if (parts.length == 2) {
+                try {
+                    int pos = Integer.parseInt(parts[0]);
+                    String id = parts[1];
+                    position = position.append(pos, id);
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid path format: " + pathElement);
+                }
             }
         }
 
         return position;
     }
 
-    /**
-     * Converts a Position object to a path list for an Operation
-     *
-     * @param position The position to convert
-     * @return The path list for the operation
-     */
     private List<String> positionToPathList(Position position) {
-        // This is a sample implementation - you should adapt this
-        // to fit your specific path encoding strategy
         List<String> pathList = new ArrayList<>();
-
         for (Position.Identifier identifier : position.getPath()) {
             pathList.add(identifier.getPosition() + ":" + identifier.getClientId());
         }
-
         return pathList;
+    }
+
+    public void debugPrintStructure() {
+        System.out.println("CRDT Structure:");
+        System.out.println("Content: \"" + cachedContent + "\"");
+        System.out.println("Character positions:");
+        for (int i = 0; i < positionOrder.size(); i++) {
+            Position pos = positionOrder.get(i);
+            char c = characters.get(pos);
+            System.out.printf("%d: '%c' at position %s%n", i, c, pos);
+        }
+        System.out.println("---------------------");
     }
 }
