@@ -3,8 +3,8 @@ package org.example.crdt;
 import java.util.*;
 
 public class TreeBasedCRDT {
-    private final Map<Position, Character> characters;
-    private final List<Position> positionOrder;
+    final Map<Position, Character> characters;
+    final List<Position> positionOrder;
     private String cachedContent;
     private final String clientId;
     private static final int STRATEGY_BOUNDARY = 100;

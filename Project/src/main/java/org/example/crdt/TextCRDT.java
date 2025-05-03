@@ -134,7 +134,7 @@ public class TextCRDT implements Serializable {
         crdt.insertText("meows");
 
         // Insert many consecutive 'd' characters
-        List<Position> dPositions = crdt.insertText("dddddddddddddd");
+        List<Position> dPositions = crdt.insertText("ddd");
 
         // Insert "zxc"
         List<Position> zxcPositions = crdt.insertText("zxc");
@@ -167,6 +167,9 @@ public class TextCRDT implements Serializable {
         crdt.insertText("x");
         crdt.insertText("x");
         crdt.insertText("x");
+        crdt.deleteCharacter(dPositions.get(0)); // Delete the first 'd'
+        crdt.deleteCharacter(zxcPositions.get(1)); // Delete the second 'zxc'
+        
 
         // Print the text
         System.out.println("Final text: " + crdt.getText());
