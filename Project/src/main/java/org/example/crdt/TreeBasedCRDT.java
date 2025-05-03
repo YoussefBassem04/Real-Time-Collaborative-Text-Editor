@@ -1,24 +1,30 @@
 package org.example.crdt;
 
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class TreeBasedCRDT {
     private TreeNode root;
     private String replicaId;
+    private Map<String, TreeNode> nodeMap; // nodeId to TreeNode for O(1) lookup
+    private Set<String> appliedOperationIds; // Track applied operations
 
     public TreeBasedCRDT() {
         this.root = new TreeNode("root");
         this.replicaId = UUID.randomUUID().toString();
+        this.nodeMap = new ConcurrentHashMap<>();
+        this.appliedOperationIds = Collections.synchronizedSet(new HashSet<>());
+        this.nodeMap.put(root.getNodeId(), root);
     }
 
     public synchronized void applyOperation(Operation operation) {
-        List<String> fullPath = operation.getPath();
-        List<String> parentPath = fullPath.subList(0, fullPath.size() - 1); // Trim last element
+        if (operation.getPath().isEmpty() || appliedOperationIds.contains(operation.getId())) {
+            return; // Skip invalid or duplicate operations
+        }
 
+        List<String> fullPath = operation.getPath();
+        String nodeId = fullPath.get(fullPath.size() - 1);
+        List<String> parentPath = fullPath.subList(0, fullPath.size() - 1);
         TreeNode parent = findParentNode(parentPath);
 
         if (parent == null) {
@@ -30,21 +36,27 @@ public class TreeBasedCRDT {
             TreeNode newNode = new TreeNode(operation.getContent());
             newNode.setTimestamp(operation.getTimestamp());
             newNode.setClientId(operation.getClientId());
+            newNode.setNodeId(nodeId);
             parent.addChild(newNode);
+            nodeMap.put(nodeId, newNode);
         } else if (operation.getType() == Operation.Type.DELETE) {
-            parent.removeChild(operation.getContent());
+            parent.removeChildById(nodeId);
+            nodeMap.remove(nodeId);
         }
+
+        appliedOperationIds.add(operation.getId());
     }
 
-
     public Operation generateInsertOp(String content, List<String> path, String clientId) {
-        long timestamp = System.currentTimeMillis();
-        return new Operation(Operation.Type.INSERT, content, path, timestamp, clientId);
+        Operation op = new Operation(Operation.Type.INSERT, content, path, clientId);
+        op.getVectorClock().put(clientId, op.getVectorClock().getOrDefault(clientId, 0) + 1);
+        return op;
     }
 
     public Operation generateDeleteOp(String content, List<String> path, String clientId) {
-        long timestamp = System.currentTimeMillis();
-        return new Operation(Operation.Type.DELETE, content, path, timestamp, clientId);
+        Operation op = new Operation(Operation.Type.DELETE, content, path, clientId);
+        op.getVectorClock().put(clientId, op.getVectorClock().getOrDefault(clientId, 0) + 1);
+        return op;
     }
 
     public String getText() {
@@ -62,25 +74,16 @@ public class TreeBasedCRDT {
 
     private TreeNode findParentNode(List<String> path) {
         TreeNode current = root;
-
         for (String pathElement : path) {
-            if (pathElement.equals("root")) continue; // skip redundant match to self
-
-            boolean found = false;
-            for (TreeNode child : current.getChildren()) {
-                if (child.getValue().equals(pathElement)) {
-                    current = child;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) return null;
+            if (pathElement.equals("root")) continue;
+            current = nodeMap.get(pathElement);
+            if (current == null) return null;
         }
         return current;
     }
 
     private void traverseTree(TreeNode node, StringBuilder sb) {
-        if (!node.getValue().equals("root")) {
+        if (!node.getValue().equals("root") && node.getValue() != null) {
             sb.append(node.getValue());
         }
         for (TreeNode child : node.getChildren()) {
@@ -91,6 +94,7 @@ public class TreeBasedCRDT {
     private Map<String, Object> getTreeStructure(TreeNode node) {
         Map<String, Object> nodeInfo = new HashMap<>();
         nodeInfo.put("value", node.getValue());
+        nodeInfo.put("nodeId", node.getNodeId());
         nodeInfo.put("timestamp", node.getTimestamp());
         nodeInfo.put("clientId", node.getClientId());
 
@@ -108,12 +112,14 @@ public class TreeBasedCRDT {
 
     private static class TreeNode implements Comparable<TreeNode> {
         private String value;
+        private String nodeId;
         private List<TreeNode> children;
         private long timestamp;
         private String clientId;
 
         public TreeNode(String value) {
             this.value = value;
+            this.nodeId = UUID.randomUUID().toString();
             this.children = new ArrayList<>();
             this.timestamp = System.currentTimeMillis();
             this.clientId = UUID.randomUUID().toString();
@@ -124,8 +130,8 @@ public class TreeBasedCRDT {
             children.sort(TreeNode::compareTo);
         }
 
-        public void removeChild(String value) {
-            children.removeIf(node -> node.getValue().equals(value));
+        public void removeChildById(String nodeId) {
+            children.removeIf(node -> node.getNodeId().equals(nodeId));
         }
 
         @Override
@@ -137,6 +143,8 @@ public class TreeBasedCRDT {
         }
 
         public String getValue() { return value; }
+        public String getNodeId() { return nodeId; }
+        public void setNodeId(String nodeId) { this.nodeId = nodeId; }
         public List<TreeNode> getChildren() { return children; }
         public long getTimestamp() { return timestamp; }
         public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
