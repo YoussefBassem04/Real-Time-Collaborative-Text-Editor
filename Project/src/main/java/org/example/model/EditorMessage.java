@@ -6,7 +6,9 @@ public class EditorMessage {
     public enum MessageType {
         OPERATION,
         SYNC_REQUEST,
-        SYNC_RESPONSE
+        SYNC_RESPONSE,
+        REDO,
+        UNDO
     }
 
     private MessageType type;

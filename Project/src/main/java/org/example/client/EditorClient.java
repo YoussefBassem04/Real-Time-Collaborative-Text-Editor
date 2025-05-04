@@ -17,18 +17,17 @@ import javax.swing.*;
 import javax.swing.event.DocumentEvent;
 import javax.swing.event.DocumentListener;
 import javax.swing.text.BadLocationException;
+import javax.swing.undo.CannotRedoException;
+import javax.swing.undo.CannotUndoException;
+import javax.swing.undo.UndoManager;
 import java.awt.*;
 import java.lang.reflect.Type;
 import java.util.*;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-import javax.swing.undo.UndoManager;
-import javax.swing.undo.CannotUndoException;
-import javax.swing.undo.CannotRedoException;
-
-
 public class EditorClient {
+
     private JFrame frame;
     private JTextArea textArea;
     private StompSession stompSession;
@@ -40,8 +39,7 @@ public class EditorClient {
     // Store character IDs for CRDT (e.g., ["client1:1234567890", "client1:1234567891", ...])
     private List<String> characterIds = new ArrayList<>();
     private UndoManager undoManager = new UndoManager();
-    private List<String> redoStack = new ArrayList<>();
-    private List<String> undoStack = new ArrayList<>(); // Store undo/redo operations
+    
     public EditorClient() {
         initializeClientInfo();
         initializeUI();
@@ -106,8 +104,15 @@ public class EditorClient {
         textArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
         textArea.setLineWrap(true);
         textArea.setWrapStyleWord(true);
-        textArea.getDocument().addUndoableEditListener(e -> undoManager.addEdit(e.getEdit()));
 
+        // Add undoable edit listener so that only local changes are recorded.
+        textArea.getDocument().addUndoableEditListener(e -> {
+            if (!isProcessingRemoteOperation.get()) {
+                undoManager.addEdit(e.getEdit());
+            }
+        });
+
+        // Add document listener for local changes.
         textArea.getDocument().addDocumentListener(new DocumentListener() {
             @Override
             public void insertUpdate(DocumentEvent e) {
@@ -122,7 +127,6 @@ public class EditorClient {
                     }
                 }
             }
-
             @Override
             public void removeUpdate(DocumentEvent e) {
                 if (!isProcessingRemoteOperation.get()) {
@@ -131,12 +135,12 @@ public class EditorClient {
                     handleLocalDelete(offset, length);
                 }
             }
-
             @Override
             public void changedUpdate(DocumentEvent e) {
                 // Not used for plain text
             }
         });
+
         undoButton.addActionListener(e -> {
             try {
                 if (undoManager.canUndo()) {
@@ -146,7 +150,7 @@ public class EditorClient {
                 ex.printStackTrace();
             }
         });
-        
+
         redoButton.addActionListener(e -> {
             try {
                 if (undoManager.canRedo()) {
@@ -156,10 +160,11 @@ public class EditorClient {
                 ex.printStackTrace();
             }
         });
+
         JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         buttonPanel.add(undoButton);
         buttonPanel.add(redoButton);
-        
+
         frame.add(buttonPanel, BorderLayout.NORTH);
         JScrollPane scrollPane = new JScrollPane(textArea);
         JPanel statusPanel = new JPanel(new BorderLayout());
@@ -189,7 +194,6 @@ public class EditorClient {
                     public Type getPayloadType(StompHeaders headers) {
                         return EditorMessage.class;
                     }
-
                     @Override
                     public void handleFrame(StompHeaders headers, Object payload) {
                         EditorMessage msg = (EditorMessage) payload;
@@ -205,7 +209,6 @@ public class EditorClient {
                 session.send("/app/editor/operation", syncRequest);
                 System.out.println("⇨ Sent SYNC_REQUEST for document: " + documentId);
             }
-
             @Override
             public void handleTransportError(StompSession session, Throwable exception) {
                 System.err.println("❌ Transport error: " + exception.getMessage());
@@ -223,13 +226,12 @@ public class EditorClient {
     private void handleLocalInsert(String text, int position) {
         synchronized (documentLock) {
             try {
-                // Generate a unique ID for each character
+                // Generate a unique ID for each character for CRDT.
                 List<String> charIds = new ArrayList<>();
                 for (int i = 0; i < text.length(); i++) {
                     charIds.add(clientId + ":" + System.currentTimeMillis() + ":" + i);
                 }
-
-                // Calculate path using character IDs
+                // Calculate path.
                 List<String> path = calculatePathForPosition(position);
 
                 EditorMessage message = new EditorMessage();
@@ -238,7 +240,7 @@ public class EditorClient {
                 message.setDocumentId(documentId);
                 message.setOperation(new Operation(Operation.Type.INSERT, text, path, System.currentTimeMillis(), clientId));
 
-                // Update local state
+                // Update local CRDT state.
                 characterIds.addAll(position, charIds);
                 previousContent = textArea.getText();
 
@@ -269,7 +271,7 @@ public class EditorClient {
                 message.setDocumentId(documentId);
                 message.setOperation(new Operation(Operation.Type.DELETE, deletedContent, path, System.currentTimeMillis(), clientId));
 
-                // Update local state
+                // Update local CRDT state.
                 characterIds.subList(position, position + length).clear();
                 previousContent = textArea.getText();
 
@@ -284,30 +286,32 @@ public class EditorClient {
     }
 
     private void handleRemoteMessage(EditorMessage message) {
-        if (!documentId.equals(message.getDocumentId())) return;
-
+        if (!documentId.equals(message.getDocumentId()))
+            return;
+    
         SwingUtilities.invokeLater(() -> {
             synchronized (documentLock) {
                 try {
+                    // Prevent the undo/redo stack from recording remote changes.
                     isProcessingRemoteOperation.set(true);
                     int caretPos = textArea.getCaretPosition();
-
+    
                     if (message.getType() == EditorMessage.MessageType.OPERATION &&
                             !message.getOperation().getClientId().equals(clientId)) {
                         Operation op = message.getOperation();
                         // Transform operation if needed (basic OT for concurrent inserts)
                         Operation transformedOp = transformOperation(op);
                         int pos = calculatePositionFromPath(transformedOp.getPath());
-
+    
                         System.out.println("Applying remote operation: " + transformedOp.getType() +
                                 ", Content: " + transformedOp.getContent() +
                                 ", Path: " + transformedOp.getPath() +
                                 ", Position: " + pos +
                                 ", Document: " + textArea.getText());
-                                undoManager.discardAllEdits();  // Reset undo stack on remote sync to avoid desync issues
-
+    
+                        // REMOVED: undoManager.discardAllEdits();
+    
                         if (transformedOp.getType() == Operation.Type.INSERT) {
-                            // Generate character IDs for inserted text
                             List<String> charIds = new ArrayList<>();
                             for (int i = 0; i < transformedOp.getContent().length(); i++) {
                                 charIds.add(transformedOp.getClientId() + ":" + transformedOp.getTimestamp() + ":" + i);
@@ -328,11 +332,9 @@ public class EditorClient {
                         previousContent = textArea.getText();
                     } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
                         String content = message.getContent();
-                        // Apply sync incrementally to preserve cursor
                         if (content != null && !content.equals(textArea.getText())) {
                             textArea.setText(content);
                             previousContent = content;
-                            // Rebuild character IDs (simplified; ideally server should provide IDs)
                             characterIds.clear();
                             for (int i = 0; i < content.length(); i++) {
                                 characterIds.add("sync:" + i);
@@ -352,7 +354,6 @@ public class EditorClient {
                 }
             }
         });
-        
     }
 
     private List<String> calculatePathForPosition(int position) {
@@ -363,7 +364,6 @@ public class EditorClient {
             } else if (position >= characterIds.size()) {
                 path.add("end");
             } else {
-                // Use the unique character ID of the previous character
                 path.add("after-" + characterIds.get(position - 1));
             }
         }
@@ -372,37 +372,32 @@ public class EditorClient {
 
     private int calculatePositionFromPath(List<String> path) {
         synchronized (documentLock) {
-            if (path == null || path.isEmpty()) return 0;
-            if (path.contains("start")) return 0;
-            if (path.contains("end")) return characterIds.size();
+            if (path == null || path.isEmpty())
+                return 0;
+            if (path.contains("start"))
+                return 0;
+            if (path.contains("end"))
+                return characterIds.size();
 
             for (int i = 0; i < characterIds.size(); i++) {
                 if (path.contains("after-" + characterIds.get(i))) {
                     return i + 1;
                 }
             }
-            // Fallback to end of document
             return characterIds.size();
         }
     }
 
     private Operation transformOperation(Operation op) {
-        // Basic OT: Adjust position for concurrent inserts at the same position
-        // If two clients insert at the same path, the one with the higher clientId goes after
         synchronized (documentLock) {
             if (op.getType() == Operation.Type.INSERT) {
                 List<String> path = op.getPath();
                 int pos = calculatePositionFromPath(path);
-                // Check for recent operations at the same position
-                // (Ideally, maintain a history of operations; simplified here)
-                // If another operation inserted at the same position, shift this one
-                // For simplicity, use clientId to break ties
-                // Note: This is a basic transformation; a full OT system would track all operations
+                // A basic concurrent insert transformation:
                 for (String id : characterIds.subList(0, Math.min(pos, characterIds.size()))) {
                     String[] parts = id.split(":");
                     if (parts.length > 1 && parts[0].compareTo(op.getClientId()) < 0 &&
                             op.getTimestamp() - Long.parseLong(parts[1]) < 1000) {
-                        // Concurrent insert by a client with lower ID; shift position
                         List<String> newPath = calculatePathForPosition(pos + 1);
                         return new Operation(op.getType(), op.getContent(), newPath,
                                 op.getTimestamp(), op.getClientId());
