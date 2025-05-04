@@ -25,7 +25,6 @@ module org.example.collaborativeeditor {
     opens org.example.config to spring.core;
     opens org.example.service to spring.beans;
     opens org.example.crdt to com.fasterxml.jackson.databind;
-    opens org.example.model to spring.core, com.fasterxml.jackson.databind;
 
     // Export public API
     exports org.example;
@@ -35,4 +34,5 @@ module org.example.collaborativeeditor {
     exports org.example.service;
     exports org.example.model;
     exports org.example.crdt;
+    opens org.example.model to com.fasterxml.jackson.databind, javafx.fxml, spring.core, spring.web;
 }

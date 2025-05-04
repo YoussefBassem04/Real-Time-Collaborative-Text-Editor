@@ -1,47 +1,36 @@
 package org.example.crdt;
 
 import java.util.List;
+import java.util.ArrayList;
 
 public class Operation {
     public enum Type {
         INSERT,
-        DELETE
+        DELETE,
+        SYNC  // New operation type for undo/redo sync
     }
 
-    public Type type;
-    public String content;
+    private Type type;
+    private String content;
     private List<String> path;
     private long timestamp;
     private String clientId;
-    public int position;
-    public int length;
+    private List<String> characterIds; // Add this field for sync operations
 
     public Operation() {
-    }
-    public Operation(int position, int length) {
-        this.type = Type.DELETE;
-        this.position = position;
-        this.length = length;
+        // Default constructor for Jackson deserialization
     }
 
-    /**
-     * Constructor for insert operations
-     * @param text Text to insert
-     * @param position Position to insert at
-     */
-    public Operation(String text, int position) {
-        this.type = Type.INSERT;
-        this.content = text;
-        this.position = position;
-    }
     public Operation(Type type, String content, List<String> path, long timestamp, String clientId) {
         this.type = type;
         this.content = content;
         this.path = path;
         this.timestamp = timestamp;
         this.clientId = clientId;
+        this.characterIds = new ArrayList<>();
     }
 
+    // Getters and setters
     public Type getType() {
         return type;
     }
@@ -82,14 +71,11 @@ public class Operation {
         this.clientId = clientId;
     }
 
-    @Override
-    public String toString() {
-        return "Operation{" +
-                "type=" + type +
-                ", content='" + content + '\'' +
-                ", path=" + path +
-                ", timestamp=" + timestamp +
-                ", clientId='" + clientId + '\'' +
-                '}';
+    public List<String> getCharacterIds() {
+        return characterIds;
+    }
+
+    public void setCharacterIds(List<String> characterIds) {
+        this.characterIds = characterIds;
     }
 }
