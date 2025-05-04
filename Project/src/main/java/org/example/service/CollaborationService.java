@@ -206,11 +206,10 @@ public class CollaborationService {
 
     private int calculatePositionFromPath(String document, List<String> charIds, List<String> path) {
         if (path == null || path.isEmpty()) return 0;
-
+    
         if (path.contains("start")) return 0;
         if (path.contains("end")) return document.length();
-
-        // First try after-X paths
+    
         for (String pathEntry : path) {
             if (pathEntry.startsWith("after-")) {
                 String charId = pathEntry.substring(6);
@@ -220,8 +219,7 @@ public class CollaborationService {
                 }
             }
         }
-
-        // Then try direct char-X paths
+    
         for (String pathEntry : path) {
             if (pathEntry.startsWith("char-")) {
                 String charId = pathEntry.substring(5);
@@ -231,8 +229,9 @@ public class CollaborationService {
                 }
             }
         }
-
-        // Default to end of document if path can't be resolved
+    
+        // Fallback to end of document if path can't be resolved
+        System.out.println("WARNING: Could not resolve path " + path + ", defaulting to end of document");
         return document.length();
     }
 

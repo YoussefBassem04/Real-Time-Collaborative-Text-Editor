@@ -7,6 +7,7 @@ import java.util.Deque;
 import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 public class UndoRedoService {
     private static final int MAX_UNDO_HISTORY = 100;
@@ -17,6 +18,9 @@ public class UndoRedoService {
 
     // Map to store deleted character positions for better undo reconstruction
     private final Map<String, Integer> characterPositionCache = new HashMap<>();
+
+    // Map to store original char IDs to new char IDs for redo
+    private final Map<String, String> charIdMapping = new HashMap<>();
 
     private final EditorController controller;
     private boolean isUndoRedoOperation = false;
@@ -40,11 +44,22 @@ public class UndoRedoService {
         // Create and apply the inverse operation
         Operation inverseOp = createInverseOperation(lastOp);
 
+        // Apply the inverse operation and capture new character IDs
+        List<String> newCharIds = applyAndSendOperationWithCharIds(inverseOp, lastOp);
+
+        // Map original char IDs to new char IDs for redo
+        if (lastOp.getType() == Operation.Type.DELETE && !newCharIds.isEmpty()) {
+            List<String> originalCharIds = lastOp.getPath().stream()
+                    .filter(p -> p.startsWith("char-"))
+                    .map(p -> p.substring(5))
+                    .collect(Collectors.toList());
+            for (int i = 0; i < Math.min(originalCharIds.size(), newCharIds.size()); i++) {
+                charIdMapping.put(originalCharIds.get(i), newCharIds.get(i));
+            }
+        }
+
         // Add the original operation to the redo stack
         redoStack.push(lastOp);
-
-        // Apply the inverse operation locally and send to server
-        applyAndSendOperation(inverseOp);
 
         isUndoRedoOperation = false;
     }
@@ -59,6 +74,27 @@ public class UndoRedoService {
 
         // Get the operation to redo
         Operation redoOp = redoStack.pop();
+
+        // Update DELETE operation paths with new character IDs
+        if (redoOp.getType() == Operation.Type.DELETE) {
+            List<String> updatedPath = new ArrayList<>();
+            for (String pathEntry : redoOp.getPath()) {
+                if (pathEntry.startsWith("char-")) {
+                    String oldCharId = pathEntry.substring(5);
+                    String newCharId = charIdMapping.getOrDefault(oldCharId, oldCharId);
+                    updatedPath.add("char-" + newCharId);
+                } else {
+                    updatedPath.add(pathEntry);
+                }
+            }
+            redoOp = new Operation(
+                    redoOp.getType(),
+                    redoOp.getContent(),
+                    updatedPath,
+                    redoOp.getTimestamp(),
+                    redoOp.getClientId()
+            );
+        }
 
         // Add it back to the undo stack
         undoStack.push(redoOp);
@@ -125,73 +161,68 @@ public class UndoRedoService {
     private List<String> determineInsertPathForUndo(Operation deleteOp) {
         List<String> path = new ArrayList<>();
 
-        // Check if we have position info from the delete paths
+        // Try to use cached position from characterPositionCache
         if (deleteOp.getPath() != null && !deleteOp.getPath().isEmpty()) {
-            // Try to extract positional information from the delete paths
-
-            // If the first character was deleted, the content should be inserted at the start
-            if (deleteOp.getPath().get(0).contains(":0")) {
-                // Check if this was the very first character in the document
-                boolean wasFirst = true;
-                for (String pathEntry : deleteOp.getPath()) {
-                    if (pathEntry.startsWith("char-")) {
-                        String charId = pathEntry.substring(5);
-                        Integer cachedPos = characterPositionCache.get(charId);
-                        if (cachedPos != null && cachedPos > 0) {
-                            wasFirst = false;
-                            break;
-                        }
-                    }
-                }
-
-                if (wasFirst) {
-                    path.add("start");
-                    return path;
+            String firstCharId = null;
+            for (String pathEntry : deleteOp.getPath()) {
+                if (pathEntry.startsWith("char-")) {
+                    firstCharId = pathEntry.substring(5);
+                    break;
                 }
             }
 
-            // Try to find a reference character that still exists in the document
-            for (String pathEntry : deleteOp.getPath()) {
-                if (pathEntry.startsWith("char-")) {
-                    String charId = pathEntry.substring(5);
+            if (firstCharId != null) {
+                Integer cachedPos = characterPositionCache.get(firstCharId);
+                if (cachedPos != null && cachedPos >= 0 && cachedPos <= controller.getDocumentState().getCharacterIds().size()) {
+                    if (cachedPos == 0) {
+                        path.add("start");
+                    } else {
+                        // Use the character ID at the position before the cached position
+                        String prevCharId = controller.getDocumentState().getCharacterIds().get(cachedPos - 1);
+                        path.add("after-" + prevCharId);
+                    }
+                    return path;
+                }
+            }
+        }
 
-                    // Parse the character ID to identify related characters
-                    String[] parts = charId.split(":");
-                    if (parts.length == 3) {
-                        String originalClientId = parts[0];
-                        String timestamp = parts[1];
-                        int index = Integer.parseInt(parts[2]);
+        // Fallback: Try to find a reference character from the delete operation's path
+        for (String pathEntry : deleteOp.getPath()) {
+            if (pathEntry.startsWith("char-")) {
+                String charId = pathEntry.substring(5);
+                String[] parts = charId.split(":");
+                if (parts.length == 3) {
+                    String originalClientId = parts[0];
+                    String timestamp = parts[1];
+                    int index = Integer.parseInt(parts[2]);
 
-                        // Try to find a character before this one that still exists
-                        if (index > 0) {
-                            String prevCharId = originalClientId + ":" + timestamp + ":" + (index - 1);
-                            int prevPos = controller.getDocumentState().getCharacterIds().indexOf(prevCharId);
-                            if (prevPos != -1) {
-                                path.add("after-" + prevCharId);
-                                return path;
-                            }
+                    // Try to find the previous character
+                    if (index > 0) {
+                        String prevCharId = originalClientId + ":" + timestamp + ":" + (index - 1);
+                        int prevPos = controller.getDocumentState().getCharacterIds().indexOf(prevCharId);
+                        if (prevPos != -1) {
+                            path.add("after-" + prevCharId);
+                            return path;
                         }
+                    }
 
-                        // Try to find a character after this one that still exists
-                        String nextCharId = originalClientId + ":" + timestamp + ":" + (index + 1);
-                        int nextPos = controller.getDocumentState().getCharacterIds().indexOf(nextCharId);
-                        if (nextPos != -1) {
-                            // Insert before the next character
-                            if (nextPos > 0) {
-                                String beforeNextId = controller.getDocumentState().getCharacterIds().get(nextPos - 1);
-                                path.add("after-" + beforeNextId);
-                                return path;
-                            } else {
-                                path.add("start");
-                                return path;
-                            }
+                    // Try to find the next character
+                    String nextCharId = originalClientId + ":" + timestamp + ":" + (index + 1);
+                    int nextPos = controller.getDocumentState().getCharacterIds().indexOf(nextCharId);
+                    if (nextPos != -1) {
+                        if (nextPos > 0) {
+                            String beforeNextId = controller.getDocumentState().getCharacterIds().get(nextPos - 1);
+                            path.add("after-" + beforeNextId);
+                        } else {
+                            path.add("start");
                         }
+                        return path;
                     }
                 }
             }
         }
 
-        // If we couldn't determine a precise position, use the current caret position as a fallback
+        // Final fallback: Use the current caret position
         int caretPos = controller.getOperationService().getCaretPosition();
         if (caretPos == 0) {
             path.add("start");
@@ -206,22 +237,43 @@ public class UndoRedoService {
     }
 
     /**
-     * Applies an operation locally and sends it to the server
+     * Applies an operation locally and sends it to the server, returning new character IDs
      */
-    private void applyAndSendOperation(Operation op) {
+    private List<String> applyAndSendOperationWithCharIds(Operation op, Operation originalOp) {
         isApplyingOperation = true;
+        List<String> newCharIds = new ArrayList<>();
 
-        // Apply the operation locally first
         if (op.getType() == Operation.Type.INSERT) {
+            int pos = controller.getOperationService().calculatePositionFromPath(op.getPath());
+            pos = Math.max(0, Math.min(pos, controller.getOperationService().getTextArea().getText().length()));
+
+            for (int i = 0; i < op.getContent().length(); i++) {
+                newCharIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
+            }
+
             controller.getOperationService().applyLocalInsert(op);
+            controller.getDocumentState().getCharacterIds().addAll(pos, newCharIds);
+
+            // Update characterPositionCache for redo
+            if (originalOp != null && originalOp.getType() == Operation.Type.DELETE) {
+                for (String charId : newCharIds) {
+                    characterPositionCache.put(charId, pos);
+                }
+            }
         } else if (op.getType() == Operation.Type.DELETE) {
             controller.getOperationService().applyLocalDelete(op);
         }
 
-        // Send the operation to the server
         controller.getNetworkService().sendOperation(op);
-
         isApplyingOperation = false;
+        return newCharIds;
+    }
+
+    /**
+     * Applies an operation locally and sends it to the server
+     */
+    private void applyAndSendOperation(Operation op) {
+        applyAndSendOperationWithCharIds(op, null);
     }
 
     /**
