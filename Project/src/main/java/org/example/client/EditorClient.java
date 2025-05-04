@@ -13,27 +13,38 @@ import org.springframework.web.socket.sockjs.client.SockJsClient;
 import org.springframework.web.socket.sockjs.client.Transport;
 import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
-import javax.swing.*;
-import javax.swing.Timer;
-import javax.swing.event.DocumentEvent;
-import javax.swing.event.DocumentListener;
-import javax.swing.text.BadLocationException;
-import java.awt.*;
+import javafx.application.Application;
+import javafx.application.Platform;
+import javafx.beans.property.SimpleStringProperty;
+import javafx.beans.property.StringProperty;
+import javafx.geometry.Insets;
+import javafx.geometry.Pos;
+import javafx.scene.Scene;
+import javafx.scene.control.*;
+import javafx.scene.layout.*;
+import javafx.stage.Stage;
+import javafx.util.Duration;
+
 import java.lang.reflect.Type;
 import java.util.*;
-import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class EditorClient {
-    private JFrame frame;
-    private JTextArea textArea;
+public class EditorClient extends Application {
+    private TextArea textArea;
     private StompSession stompSession;
     private String clientId;
     private String documentId;
     private AtomicBoolean isProcessingRemoteOperation = new AtomicBoolean(false);
     private final Object documentLock = new Object();
     private String previousContent = "";
+    private Label statusLabel;
+    private ComboBox<String> documentSelector;
+
+    // Undo/Redo stacks
+    private Deque<UndoRedoState> undoStack = new LinkedList<>();
+    private Deque<UndoRedoState> redoStack = new LinkedList<>();
+    private boolean isUndoRedoOperation = false;
 
     // Store character IDs for CRDT
     private List<String> characterIds = new ArrayList<>();
@@ -41,145 +52,187 @@ public class EditorClient {
     // Queue for batching operations
     private Queue<Operation> operationQueue = new ConcurrentLinkedQueue<>();
 
-    // Rate limiting for operations
-    private Timer operationFlushTimer;
-    private static final int OPERATION_FLUSH_DELAY = 100; // ms
+    // Connection status
+    private StringProperty connectionStatus = new SimpleStringProperty("Disconnected");
 
-    // Batching for multiple delete/insert operations
-    private Timer batchTimer;
+    // Rate limiting and batching timers
+    private javafx.animation.Timeline operationFlushTimer;
+    private javafx.animation.Timeline batchTimer;
+    private javafx.animation.Timeline consistencyCheckTimer;
+
+    // Pending edits
     private List<Integer> pendingDeletePositions = new ArrayList<>();
     private List<Integer> pendingDeleteLengths = new ArrayList<>();
-    private static final int BATCH_DELAY = 50; // ms
 
-    public EditorClient() {
-        initializeClientInfo();
-        initializeUI();
+    // Constants
+    private static final int OPERATION_FLUSH_DELAY = 100; // ms
+    private static final int BATCH_DELAY = 50; // ms
+    private static final int MAX_UNDO_HISTORY = 100;
+
+    // Previously visited documents
+    private Set<String> recentDocuments = new HashSet<>();
+
+    @Override
+    public void start(Stage primaryStage) {
+        // Initialize client ID
+        this.clientId = UUID.randomUUID().toString();
+
+        // Create UI
+        createUI(primaryStage);
+
+        // Initialize timers
         initializeTimers();
-        connectToWebSocket();
+    }
+
+    private void createUI(Stage primaryStage) {
+        BorderPane root = new BorderPane();
+        root.setPadding(new Insets(10));
+
+        // Top section - Document selection and client info
+        HBox topBar = new HBox(10);
+        topBar.setAlignment(Pos.CENTER_LEFT);
+        topBar.setPadding(new Insets(5));
+
+        Label docLabel = new Label("Document:");
+        documentSelector = new ComboBox<>();
+        documentSelector.setEditable(true);
+        documentSelector.setPrefWidth(200);
+        documentSelector.getItems().add("default");
+        documentSelector.setValue("default");
+        this.documentId = "default";
+
+        Button connectButton = new Button("Connect");
+        connectButton.setOnAction(e -> connectToDocument(documentSelector.getValue()));
+
+        Label clientIdLabel = new Label("Client ID:");
+        TextField clientIdField = new TextField(clientId);
+        clientIdField.setPrefWidth(220);
+        clientIdField.setEditable(false);
+
+        topBar.getChildren().addAll(docLabel, documentSelector, connectButton,
+                new Separator(javafx.geometry.Orientation.VERTICAL),
+                clientIdLabel, clientIdField);
+
+        // Center - Text editor
+        textArea = new TextArea();
+        textArea.setWrapText(true);
+        textArea.textProperty().addListener((obs, oldText, newText) -> {
+            if (!isProcessingRemoteOperation.get() && !isUndoRedoOperation) {
+                handleLocalChange(oldText, newText);
+            }
+        });
+
+        // Bottom - Status bar
+        HBox statusBar = new HBox(10);
+        statusBar.setAlignment(Pos.CENTER_LEFT);
+        statusBar.setPadding(new Insets(5));
+
+        statusLabel = new Label();
+        statusLabel.textProperty().bind(connectionStatus);
+
+        Label charCountLabel = new Label();
+        textArea.textProperty().addListener((obs, old, newText) ->
+                charCountLabel.setText("Characters: " + newText.length()));
+        charCountLabel.setText("Characters: 0");
+
+        Region spacer = new Region();
+        HBox.setHgrow(spacer, Priority.ALWAYS);
+
+        // Undo/Redo buttons
+        Button undoButton = new Button("Undo");
+        undoButton.setOnAction(e -> performUndo());
+        undoButton.disableProperty().bind(textArea.disabledProperty());
+
+        Button redoButton = new Button("Redo");
+        redoButton.setOnAction(e -> performRedo());
+        redoButton.disableProperty().bind(textArea.disabledProperty());
+
+        statusBar.getChildren().addAll(statusLabel, spacer, charCountLabel,
+                new Separator(javafx.geometry.Orientation.VERTICAL),
+                undoButton, redoButton);
+
+        // Set up keyboard shortcuts for undo/redo
+        textArea.setOnKeyPressed(event -> {
+            if (event.isControlDown()) {
+                switch (event.getCode()) {
+                    case Z:
+                        performUndo();
+                        event.consume();
+                        break;
+                    case Y:
+                        performRedo();
+                        event.consume();
+                        break;
+                    default:
+                        break;
+                }
+            }
+        });
+
+        // Assemble root layout
+        root.setTop(topBar);
+        root.setCenter(textArea);
+        root.setBottom(statusBar);
+
+        // Create scene and show stage
+        Scene scene = new Scene(root, 900, 600);
+        primaryStage.setScene(scene);
+        primaryStage.setTitle("Collaborative JavaFX Editor");
+        primaryStage.setOnCloseRequest(e -> cleanup());
+        primaryStage.show();
+
+        // Initial connection
+        connectToDocument(documentId);
     }
 
     private void initializeTimers() {
         // Timer for flushing operations to server
-        operationFlushTimer = new Timer(OPERATION_FLUSH_DELAY, e -> flushOperations());
-        operationFlushTimer.setRepeats(true);
-        operationFlushTimer.start();
+        operationFlushTimer = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(Duration.millis(OPERATION_FLUSH_DELAY),
+                        e -> flushOperations())
+        );
+        operationFlushTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        operationFlushTimer.play();
 
         // Timer for batching local edits
-        batchTimer = new Timer(BATCH_DELAY, e -> processPendingEdits());
-        batchTimer.setRepeats(false);
-        Timer consistencyCheckTimer = new Timer(5000, e -> validateClientState());
-        consistencyCheckTimer.setRepeats(true);
-        consistencyCheckTimer.start();
+        batchTimer = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(Duration.millis(BATCH_DELAY),
+                        e -> processPendingEdits())
+        );
+        batchTimer.setCycleCount(1);
+
+        // Timer for consistency checks
+        consistencyCheckTimer = new javafx.animation.Timeline(
+                new javafx.animation.KeyFrame(Duration.millis(5000),
+                        e -> validateClientState())
+        );
+        consistencyCheckTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
+        consistencyCheckTimer.play();
     }
 
-    private void initializeClientInfo() {
-        JPanel panel = new JPanel(new GridLayout(0, 1));
-        JTextField docIdField = new JTextField(10);
-        docIdField.setText("default");
-        panel.add(new JLabel("Enter document ID to join:"));
-        panel.add(docIdField);
+    private void connectToDocument(String docId) {
+        // Clear editor state
+        textArea.setDisable(true);
+        connectionStatus.set("Connecting to document: " + docId + "...");
 
-        JRadioButton newIdButton = new JRadioButton("Generate new client ID");
-        JRadioButton existingIdButton = new JRadioButton("Use existing client ID");
-        ButtonGroup group = new ButtonGroup();
-        group.add(newIdButton);
-        group.add(existingIdButton);
-        newIdButton.setSelected(true);
+        // Update document ID
+        this.documentId = docId;
 
-        panel.add(newIdButton);
-        panel.add(existingIdButton);
-
-        JTextField clientIdField = new JTextField(20);
-        clientIdField.setEnabled(false);
-        panel.add(new JLabel("Enter existing client ID:"));
-        panel.add(clientIdField);
-
-        newIdButton.addActionListener(e -> clientIdField.setEnabled(false));
-        existingIdButton.addActionListener(e -> clientIdField.setEnabled(true));
-
-        int result = JOptionPane.showConfirmDialog(null, panel,
-                "Collaborative Editor Settings", JOptionPane.OK_CANCEL_OPTION);
-
-        if (result == JOptionPane.CANCEL_OPTION) {
-            System.exit(0);
+        // Add to recent documents
+        if (!recentDocuments.contains(docId)) {
+            recentDocuments.add(docId);
+            documentSelector.getItems().add(docId);
         }
 
-        this.documentId = docIdField.getText().trim();
-        if (this.documentId.isEmpty()) {
-            this.documentId = "default";
+        // Reset editor state
+        synchronized (documentLock) {
+            characterIds.clear();
+            undoStack.clear();
+            redoStack.clear();
         }
 
-        if (newIdButton.isSelected()) {
-            this.clientId = UUID.randomUUID().toString();
-        } else {
-            String inputId = clientIdField.getText().trim();
-            this.clientId = inputId.isEmpty() ? UUID.randomUUID().toString() : inputId;
-        }
-
-        System.out.println("Initializing with Client ID: " + this.clientId);
-        System.out.println("Joining Document ID: " + this.documentId);
-    }
-
-    private void initializeUI() {
-        frame = new JFrame("Collaborative Editor - Doc: " + documentId + " - Client: " + clientId.substring(0, 8));
-        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
-        frame.setSize(800, 600);
-
-        textArea = new JTextArea();
-        textArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
-        textArea.setLineWrap(true);
-        textArea.setWrapStyleWord(true);
-
-        textArea.getDocument().addDocumentListener(new DocumentListener() {
-            @Override
-            public void insertUpdate(DocumentEvent e) {
-                if (!isProcessingRemoteOperation.get()) {
-                    try {
-                        int offset = e.getOffset();
-                        int length = e.getLength();
-                        String insertedText = textArea.getText(offset, length);
-                        handleLocalInsert(insertedText, offset);
-                    } catch (BadLocationException ex) {
-                        ex.printStackTrace();
-                    }
-                }
-            }
-
-            @Override
-            public void removeUpdate(DocumentEvent e) {
-                if (!isProcessingRemoteOperation.get()) {
-                    int offset = e.getOffset();
-                    int length = e.getLength();
-
-                    // Add to batch for processing
-                    synchronized (pendingDeletePositions) {
-                        pendingDeletePositions.add(offset);
-                        pendingDeleteLengths.add(length);
-
-                        // Reset timer for batch processing
-                        if (batchTimer.isRunning()) {
-                            batchTimer.restart();
-                        } else {
-                            batchTimer.start();
-                        }
-                    }
-                }
-            }
-
-            @Override
-            public void changedUpdate(DocumentEvent e) {
-                // Not used for plain text
-            }
-        });
-
-        JScrollPane scrollPane = new JScrollPane(textArea);
-        JPanel statusPanel = new JPanel(new BorderLayout());
-        JLabel statusLabel = new JLabel(" Connected as: " + clientId.substring(0, 8) + " | Document: " + documentId);
-        statusPanel.add(statusLabel, BorderLayout.WEST);
-
-        frame.add(scrollPane, BorderLayout.CENTER);
-        frame.add(statusPanel, BorderLayout.SOUTH);
-        frame.setVisible(true);
+        // Connect to WebSocket
+        connectToWebSocket();
     }
 
     private void connectToWebSocket() {
@@ -193,6 +246,11 @@ public class EditorClient {
             public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
                 System.out.println("✅ Connected to WebSocket");
                 stompSession = session;
+
+                Platform.runLater(() -> {
+                    connectionStatus.set("Connected to document: " + documentId);
+                    textArea.setDisable(false);
+                });
 
                 String topic = "/topic/editor/" + documentId;
                 session.subscribe(topic, new StompFrameHandler() {
@@ -221,14 +279,148 @@ public class EditorClient {
             public void handleTransportError(StompSession session, Throwable exception) {
                 System.err.println("❌ Transport error: " + exception.getMessage());
                 exception.printStackTrace();
-                SwingUtilities.invokeLater(() -> {
-                    JOptionPane.showMessageDialog(frame,
-                            "Connection error: " + exception.getMessage(),
-                            "Connection Error",
-                            JOptionPane.ERROR_MESSAGE);
+                Platform.runLater(() -> {
+                    connectionStatus.set("Connection error: " + exception.getMessage());
+                    textArea.setDisable(true);
+
+                    Alert alert = new Alert(Alert.AlertType.ERROR);
+                    alert.setTitle("Connection Error");
+                    alert.setHeaderText("WebSocket Connection Failed");
+                    alert.setContentText("Error: " + exception.getMessage());
+                    alert.showAndWait();
                 });
             }
         });
+    }
+
+    private void handleLocalChange(String oldText, String newText) {
+        if (oldText == null || newText == null) return;
+
+        // Find the differences between old and new text
+        int[] diffInfo = calculateTextDifference(oldText, newText);
+        int position = diffInfo[0];
+        int deletedLength = diffInfo[1];
+        int insertedLength = diffInfo[2];
+
+        // Handle deletes first if needed
+        if (deletedLength > 0) {
+            synchronized (pendingDeletePositions) {
+                pendingDeletePositions.add(position);
+                pendingDeleteLengths.add(deletedLength);
+
+                // Reset timer for batch processing
+                if (batchTimer.getStatus() == javafx.animation.Animation.Status.RUNNING) {
+                    batchTimer.stop();
+                }
+                batchTimer.play();
+            }
+        }
+
+        // Handle inserts if needed
+        if (insertedLength > 0) {
+            String insertedText = newText.substring(position, position + insertedLength);
+            handleLocalInsert(insertedText, position);
+        }
+
+        // Save state for undo
+        saveStateForUndo(oldText);
+    }
+
+    private int[] calculateTextDifference(String oldText, String newText) {
+        int commonPrefixLength = 0;
+        int minLength = Math.min(oldText.length(), newText.length());
+
+        // Find common prefix
+        while (commonPrefixLength < minLength &&
+                oldText.charAt(commonPrefixLength) == newText.charAt(commonPrefixLength)) {
+            commonPrefixLength++;
+        }
+
+        // Find common suffix
+        int oldIndex = oldText.length() - 1;
+        int newIndex = newText.length() - 1;
+        int commonSuffixLength = 0;
+
+        while (oldIndex >= commonPrefixLength &&
+                newIndex >= commonPrefixLength &&
+                oldText.charAt(oldIndex) == newText.charAt(newIndex)) {
+            oldIndex--;
+            newIndex--;
+            commonSuffixLength++;
+        }
+
+        int deletedLength = oldText.length() - commonPrefixLength - commonSuffixLength;
+        int insertedLength = newText.length() - commonPrefixLength - commonSuffixLength;
+
+        return new int[] { commonPrefixLength, deletedLength, insertedLength };
+    }
+
+    private void saveStateForUndo(String previousState) {
+        // Don't save state during undo/redo operations
+        if (isUndoRedoOperation) return;
+
+        // Save current state to undo stack
+        undoStack.push(new UndoRedoState(previousState, new ArrayList<>(characterIds)));
+
+        // Clear redo stack when new edits are made
+        redoStack.clear();
+
+        // Limit undo stack size
+        if (undoStack.size() > MAX_UNDO_HISTORY) {
+            undoStack.removeLast();
+        }
+    }
+
+    private void performUndo() {
+        if (undoStack.isEmpty()) return;
+
+        // Get previous state
+        UndoRedoState state = undoStack.pop();
+
+        // Save current state to redo stack
+        redoStack.push(new UndoRedoState(textArea.getText(), new ArrayList<>(characterIds)));
+
+        // Apply previous state
+        isUndoRedoOperation = true;
+        try {
+            isProcessingRemoteOperation.set(true);
+            textArea.setText(state.text);
+
+            synchronized (documentLock) {
+                characterIds.clear();
+                characterIds.addAll(state.characterIds);
+                previousContent = state.text;
+            }
+        } finally {
+            isProcessingRemoteOperation.set(false);
+            isUndoRedoOperation = false;
+        }
+    }
+
+    private void performRedo() {
+        if (redoStack.isEmpty()) return;
+
+        // Get next state
+        UndoRedoState state = redoStack.pop();
+
+        // Save current state to undo stack
+        undoStack.push(new UndoRedoState(textArea.getText(), new ArrayList<>(characterIds)));
+
+        // Apply next state
+        isUndoRedoOperation = true;
+        try {
+            isProcessingRemoteOperation.set(true);
+            textArea.setText(state.text);
+
+            synchronized (documentLock) {
+                characterIds.clear();
+                characterIds.addAll(state.characterIds);
+                previousContent = state.text;
+            }
+        } finally {
+            isProcessingRemoteOperation.set(false);
+            isUndoRedoOperation = false;
+        }
     }
 
     private void processPendingEdits() {
@@ -382,15 +574,20 @@ public class EditorClient {
     private void handleRemoteMessage(EditorMessage message) {
         if (!documentId.equals(message.getDocumentId())) return;
 
-        SwingUtilities.invokeLater(() -> {
+        Platform.runLater(() -> {
             synchronized (documentLock) {
                 try {
                     isProcessingRemoteOperation.set(true);
+
+                    // Save caret position
                     int caretPos = textArea.getCaretPosition();
 
                     if (message.getType() == EditorMessage.MessageType.OPERATION &&
                             !message.getOperation().getClientId().equals(clientId)) {
                         Operation op = message.getOperation();
+
+                        // Save state for undo before applying remote changes
+                        saveStateForUndo(textArea.getText());
 
                         if (op.getType() == Operation.Type.INSERT) {
                             processRemoteInsert(op, caretPos);
@@ -401,6 +598,11 @@ public class EditorClient {
                         // Validate state after operation
                         validateClientState();
                     } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
+                        // Save state for undo before syncing
+                        if (!textArea.getText().isEmpty()) {
+                            saveStateForUndo(textArea.getText());
+                        }
+
                         processSyncResponse(message, caretPos);
                     }
 
@@ -427,12 +629,17 @@ public class EditorClient {
             }
 
             // Insert the content and update character IDs
-            textArea.insert(op.getContent(), pos);
+            String currentText = textArea.getText();
+            String newText = currentText.substring(0, pos) + op.getContent() +
+                    currentText.substring(pos);
+            textArea.setText(newText);
             characterIds.addAll(pos, charIds);
 
             // Update caret position if needed
             if (pos <= caretPos) {
-                textArea.setCaretPosition(caretPos + op.getContent().length());
+                textArea.positionCaret(caretPos + op.getContent().length());
+            } else {
+                textArea.positionCaret(caretPos);
             }
 
             // Update state
@@ -464,10 +671,14 @@ public class EditorClient {
                 return;
             }
 
+            // Build a new text by removing characters at specific positions
+            StringBuilder sb = new StringBuilder(textArea.getText());
+            int caretAdjustment = 0;
+
             // Delete in reverse order to avoid index shifting issues
             for (int pos : positionsToDelete) {
-                if (pos >= 0 && pos < textArea.getText().length()) {
-                    textArea.replaceRange("", pos, pos + 1);
+                if (pos >= 0 && pos < sb.length()) {
+                    sb.deleteCharAt(pos);
 
                     // Remove character ID
                     if (pos < characterIds.size()) {
@@ -476,14 +687,19 @@ public class EditorClient {
 
                     // Adjust caret position if needed
                     if (pos < caretPos) {
-                        caretPos--;
+                        caretAdjustment--;
                     }
                 }
             }
 
+            // Update text area with modified content
+            textArea.setText(sb.toString());
+
             // Set caret position and update state
-            textArea.setCaretPosition(Math.max(0, Math.min(caretPos, textArea.getText().length())));
+            int newCaretPos = Math.max(0, Math.min(caretPos + caretAdjustment, textArea.getLength()));
+            textArea.positionCaret(newCaretPos);
             previousContent = textArea.getText();
+
             System.out.println("Applied remote DELETE for " + positionsToDelete.size() + " characters");
         } catch (Exception e) {
             System.err.println("Error processing remote delete: " + e.getMessage());
@@ -532,7 +748,8 @@ public class EditorClient {
             }
 
             // Adjust caret position
-            textArea.setCaretPosition(Math.min(caretPos, textArea.getDocument().getLength()));
+            int newPos = Math.min(caretPos, textArea.getLength());
+            textArea.positionCaret(newPos);
         } catch (Exception e) {
             System.err.println("Error processing sync response: " + e.getMessage());
             e.printStackTrace();
@@ -569,6 +786,7 @@ public class EditorClient {
 
         return characterIds.size(); // Default to end of document
     }
+
     private void validateClientState() {
         int textLength = textArea.getText().length();
         int charIdsCount = characterIds.size();
@@ -593,7 +811,39 @@ public class EditorClient {
         }
     }
 
+    private void cleanup() {
+        // Stop timers
+        if (operationFlushTimer != null) {
+            operationFlushTimer.stop();
+        }
+        if (batchTimer != null) {
+            batchTimer.stop();
+        }
+        if (consistencyCheckTimer != null) {
+            consistencyCheckTimer.stop();
+        }
+
+        // Close WebSocket connection
+        if (stompSession != null && stompSession.isConnected()) {
+            try {
+                stompSession.disconnect();
+                System.out.println("WebSocket disconnected");
+            } catch (Exception e) {
+                System.err.println("Error disconnecting: " + e.getMessage());
+            }
+        }
+    }
+    private static class UndoRedoState {
+        final String text;
+        final List<String> characterIds;
+
+        UndoRedoState(String text, List<String> characterIds) {
+            this.text = text;
+            this.characterIds = characterIds;
+        }
+    }
+
     public static void main(String[] args) {
-        SwingUtilities.invokeLater(EditorClient::new);
+        launch(args);
     }
 }
