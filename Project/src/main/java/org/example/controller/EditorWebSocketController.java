@@ -8,7 +8,6 @@ import org.springframework.messaging.handler.annotation.MessageMapping;
 import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.stereotype.Controller;
-import org.springframework.web.socket.messaging.SessionConnectEvent;
 import org.springframework.web.socket.messaging.SessionDisconnectEvent;
 
 @Controller
@@ -25,50 +24,32 @@ public class EditorWebSocketController {
     }
 
     @MessageMapping("/editor/operation")
-    public void handleOperation(EditorMessage message, SimpMessageHeaderAccessor headerAccessor) {
+    public void handleOperation(EditorMessage message) {
         System.out.println("▶ Received: " + message.getType() +
-                (message.getOperations() != null ?
-                        " " + message.getOperations().size() + " operations" :
-                        " content: " + message.getContent()));
+                (message.getOperation() != null ?
+                        " " + message.getOperation().getType() + " '" + message.getOperation().getContent() + "'" :
+                        " content: " + message.getContent()) +
+                " for document: " + message.getDocumentId());
 
-        switch (message.getType()) {
-            case CREATE_DOCUMENT:
-                String documentId = collaborationService.createDocument();
-                EditorMessage createResponse = new EditorMessage();
-                createResponse.setType(EditorMessage.MessageType.CREATE_DOCUMENT_RESPONSE);
-                createResponse.setDocumentId(documentId);
-                createResponse.setClientId(message.getClientId());
-                messagingTemplate.convertAndSend("/topic/editor", createResponse);
-                break;
+        EditorMessage processedMessage = collaborationService.processMessage(message);
+        if (processedMessage != null) {
+            String documentId = processedMessage.getDocumentId();
+            if (documentId == null || documentId.isEmpty()) {
+                documentId = "default";
+            }
 
-            case OPERATION:
-            case SYNC_REQUEST:
-            case CURSOR_UPDATE:
-                EditorMessage processedMessage = collaborationService.processMessage(message);
-                if (processedMessage != null) {
-                    messagingTemplate.convertAndSend("/topic/editor", processedMessage);
-                }
-                break;
-
-            default:
-                break;
+            // Send to document-specific topic
+            String destination = "/topic/editor/" + documentId;
+            messagingTemplate.convertAndSend(destination, processedMessage);
+            System.out.println("◀ Sent to: " + destination);
+            
         }
     }
 
     @EventListener
-    public void handleWebSocketConnectListener(SessionConnectEvent event) {
-        SimpMessageHeaderAccessor headerAccessor = SimpMessageHeaderAccessor.wrap(event.getMessage());
-        String clientId = headerAccessor.getSessionId();
-        // Document ID should be provided by client; placeholder for now
-        collaborationService.clientConnected(clientId, "default");
-        System.out.println("Client connected: " + clientId);
-    }
-
-    @EventListener
-    public void handleWebSocketDisconnectListener(SessionDisconnectEvent event) {
-        SimpMessageHeaderAccessor headerAccessor = SimpMessageHeaderAccessor.wrap(event.getMessage());
-        String clientId = headerAccessor.getSessionId();
-        collaborationService.clientDisconnected(clientId);
-        System.out.println("Client disconnected: " + clientId);
+    public void handleSessionDisconnect(SessionDisconnectEvent event) {
+        SimpMessageHeaderAccessor headers = SimpMessageHeaderAccessor.wrap(event.getMessage());
+        String clientId = headers.getSessionId();
+        collaborationService.handleClientDisconnect(clientId);
     }
 }

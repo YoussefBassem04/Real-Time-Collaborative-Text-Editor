@@ -6,29 +6,75 @@ import java.util.List;
 
 public class EditorMessage {
     public enum MessageType {
-        OPERATION, SYNC_REQUEST, SYNC_RESPONSE, CREATE_DOCUMENT, CREATE_DOCUMENT_RESPONSE,
-        CURSOR_UPDATE
+        SYNC_REQUEST,
+        SYNC_RESPONSE,
+        OPERATION
     }
 
     private MessageType type;
-    private List<Operation> operations; // Support batch operations
-    private String content;
     private String clientId;
     private String documentId;
-    private Integer cursorPosition;
+    private String content;
+    private Operation operation;
+    private List<String> nodeIds;
 
-    public EditorMessage() {}
+    public MessageType getType() {
+        return type;
+    }
 
-    public MessageType getType() { return type; }
-    public void setType(MessageType type) { this.type = type; }
-    public List<Operation> getOperations() { return operations; }
-    public void setOperations(List<Operation> operations) { this.operations = operations; }
-    public String getContent() { return content; }
-    public void setContent(String content) { this.content = content; }
-    public String getClientId() { return clientId; }
-    public void setClientId(String clientId) { this.clientId = clientId; }
-    public String getDocumentId() { return documentId; }
-    public void setDocumentId(String documentId) { this.documentId = documentId; }
-    public Integer getCursorPosition() { return cursorPosition; }
-    public void setCursorPosition(Integer cursorPosition) { this.cursorPosition = cursorPosition; }
+    public void setType(MessageType type) {
+        this.type = type;
+    }
+
+    public String getClientId() {
+        return clientId;
+    }
+
+    public void setClientId(String clientId) {
+        this.clientId = clientId;
+    }
+
+    public String getDocumentId() {
+        return documentId;
+    }
+
+    public void setDocumentId(String documentId) {
+        this.documentId = documentId;
+    }
+
+    public String getContent() {
+        return content;
+    }
+
+    public void setContent(String content) {
+        this.content = content;
+    }
+
+    public Operation getOperation() {
+        return operation;
+    }
+
+    public void setOperation(Operation operation) {
+        this.operation = operation;
+    }
+
+    public List<String> getNodeIds() {
+        return nodeIds;
+    }
+
+    public void setNodeIds(List<String> nodeIds) {
+        this.nodeIds = nodeIds;
+    }
+
+    @Override
+    public String toString() {
+        return "EditorMessage{" +
+                "type=" + type +
+                ", clientId='" + clientId + '\'' +
+                ", documentId='" + documentId + '\'' +
+                ", content='" + content + '\'' +
+                ", operation=" + operation +
+                ", nodeIds=" + nodeIds +
+                '}';
+    }
 }

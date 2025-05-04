@@ -1,154 +1,227 @@
 package org.example.crdt;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class TreeBasedCRDT {
-    private TreeNode root;
-    private String replicaId;
-    private Map<String, TreeNode> nodeMap; // nodeId to TreeNode for O(1) lookup
-    private Set<String> appliedOperationIds; // Track applied operations
+    private final TreeNode root;
+    private final Map<String, TreeNode> nodeMap;
+    private final String clientId;
+    private long operationCounter = 0;
 
-    public TreeBasedCRDT() {
-        this.root = new TreeNode("root");
-        this.replicaId = UUID.randomUUID().toString();
-        this.nodeMap = new ConcurrentHashMap<>();
-        this.appliedOperationIds = Collections.synchronizedSet(new HashSet<>());
-        this.nodeMap.put(root.getNodeId(), root);
+    public TreeBasedCRDT(String clientId) {
+        this.clientId = clientId;
+        this.nodeMap = new HashMap<>();
+        this.root = new TreeNode("root", new Position(), null);
+        this.nodeMap.put("root", root);
     }
 
-    public synchronized void applyOperation(Operation operation) {
-        if (operation.getPath().isEmpty() || appliedOperationIds.contains(operation.getId())) {
-            return; // Skip invalid or duplicate operations
+    public Operation insert(int index, char c) {
+        String nodeId = clientId + ":" + (++operationCounter);
+        Position position = generatePositionForIndex(index);
+        TreeNode newNode = new TreeNode(nodeId, position, c);
+        
+        TreeNode parent = findParentNode(position);
+        insertNodeInOrder(parent, newNode);
+        nodeMap.put(nodeId, newNode);
+
+        Operation op = new Operation(
+                Operation.Type.INSERT,
+                String.valueOf(c),
+                positionToPathList(position),
+                System.currentTimeMillis(),
+                clientId
+        );
+        op.setNodeId(nodeId);
+        return op;
+    }
+
+    public Operation delete(int index) {
+        TreeNode nodeToDelete = findNodeAtIndex(index);
+        if (nodeToDelete == null) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
         }
 
-        List<String> fullPath = operation.getPath();
-        String nodeId = fullPath.get(fullPath.size() - 1);
-        List<String> parentPath = fullPath.subList(0, fullPath.size() - 1);
-        TreeNode parent = findParentNode(parentPath);
-
-        if (parent == null) {
-            System.err.println("Could not find parent node for path: " + parentPath);
-            return;
+        TreeNode parent = nodeToDelete.getParent();
+        if (parent != null) {
+            parent.removeChild(nodeToDelete);
         }
+        nodeMap.remove(nodeToDelete.getNodeId());
 
+        return new Operation(
+                Operation.Type.DELETE,
+                String.valueOf(nodeToDelete.getContent()),
+                Collections.singletonList(nodeToDelete.getNodeId()),
+                System.currentTimeMillis(),
+                clientId
+        );
+    }
+
+    public boolean applyOperation(Operation operation) {
         if (operation.getType() == Operation.Type.INSERT) {
-            TreeNode newNode = new TreeNode(operation.getContent());
-            newNode.setTimestamp(operation.getTimestamp());
-            newNode.setClientId(operation.getClientId());
-            newNode.setNodeId(nodeId);
-            parent.addChild(newNode);
+            if (operation.getContent().length() != 1) {
+                return false;
+            }
+
+            String nodeId = operation.getNodeId();
+            if (nodeId == null || nodeMap.containsKey(nodeId)) {
+                return false;
+            }
+
+            Position position = pathListToPosition(operation.getPath());
+            TreeNode newNode = new TreeNode(nodeId, position, operation.getContent().charAt(0));
+            TreeNode parent = findParentNode(position);
+            insertNodeInOrder(parent, newNode);
             nodeMap.put(nodeId, newNode);
+            return true;
         } else if (operation.getType() == Operation.Type.DELETE) {
-            parent.removeChildById(nodeId);
-            nodeMap.remove(nodeId);
+            String targetNodeId = operation.getPath().get(0);
+            TreeNode nodeToDelete = nodeMap.get(targetNodeId);
+            if (nodeToDelete != null) {
+                TreeNode parent = nodeToDelete.getParent();
+                if (parent != null) {
+                    parent.removeChild(nodeToDelete);
+                }
+                nodeMap.remove(targetNodeId);
+                return true;
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private Position generatePositionForIndex(int index) {
+        List<TreeNode> nodes = getAllNodesInOrder();
+        if (index < 0 || index > nodes.size()) {
+            throw new IndexOutOfBoundsException("Index out of bounds: " + index);
         }
 
-        appliedOperationIds.add(operation.getId());
+        if (index == 0) {
+            return Position.generatePositionBetween(null, nodes.isEmpty() ? null : nodes.get(0).getPosition(), clientId);
+        } else if (index == nodes.size()) {
+            return Position.generatePositionBetween(nodes.get(index - 1).getPosition(), null, clientId);
+        } else {
+            return Position.generatePositionBetween(
+                    nodes.get(index - 1).getPosition(),
+                    nodes.get(index).getPosition(),
+                    clientId
+            );
+        }
     }
 
-    public Operation generateInsertOp(String content, List<String> path, String clientId) {
-        Operation op = new Operation(Operation.Type.INSERT, content, path, clientId);
-        op.getVectorClock().put(clientId, op.getVectorClock().getOrDefault(clientId, 0) + 1);
-        return op;
+    private TreeNode findParentNode(Position position) {
+        TreeNode current = root;
+        TreeNode bestMatch = root;
+        
+        while (current != null) {
+            boolean foundBetterMatch = false;
+            for (TreeNode child : current.getChildren()) {
+                if (child.getPosition().isAncestorOf(position)) {
+                    current = child;
+                    bestMatch = child;
+                    foundBetterMatch = true;
+                    break;
+                }
+            }
+            if (!foundBetterMatch) {
+                break;
+            }
+        }
+        
+        return bestMatch;
     }
 
-    public Operation generateDeleteOp(String content, List<String> path, String clientId) {
-        Operation op = new Operation(Operation.Type.DELETE, content, path, clientId);
-        op.getVectorClock().put(clientId, op.getVectorClock().getOrDefault(clientId, 0) + 1);
-        return op;
+    private TreeNode findNodeAtIndex(int index) {
+        List<TreeNode> nodes = getAllNodesInOrder();
+        if (index < 0 || index >= nodes.size()) {
+            return null;
+        }
+        return nodes.get(index);
     }
 
-    public String getText() {
+    private List<TreeNode> getAllNodesInOrder() {
+        List<TreeNode> result = new ArrayList<>();
+        collectNodesInOrder(root, result);
+        return result;
+    }
+
+    private void collectNodesInOrder(TreeNode node, List<TreeNode> result) {
+        for (TreeNode child : node.getChildren()) {
+            result.add(child);
+            collectNodesInOrder(child, result);
+        }
+    }
+
+    private void insertNodeInOrder(TreeNode parent, TreeNode newNode) {
+        List<TreeNode> children = parent.getChildren();
+        int idx = 0;
+        for (; idx < children.size(); idx++) {
+            if (newNode.getPosition().compareTo(children.get(idx).getPosition()) < 0) {
+                break;
+            }
+        }
+        children.add(idx, newNode);
+        newNode.setParent(parent);
+    }
+
+    private Position pathListToPosition(List<String> pathList) {
+        Position position = new Position();
+        for (String pathElement : pathList) {
+            String[] parts = pathElement.split(":", 2);
+            if (parts.length == 2) {
+                try {
+                    int pos = Integer.parseInt(parts[0]);
+                    String id = parts[1];
+                    position = position.append(pos, id);
+                } catch (NumberFormatException e) {
+                    System.err.println("Invalid path format: " + pathElement);
+                }
+            }
+        }
+        return position;
+    }
+
+    private List<String> positionToPathList(Position position) {
+        List<String> pathList = new ArrayList<>();
+        for (Position.Identifier identifier : position.getPath()) {
+            pathList.add(identifier.getPosition() + ":" + identifier.getClientId());
+        }
+        return pathList;
+    }
+
+    public String getContent() {
         StringBuilder sb = new StringBuilder();
-        traverseTree(root, sb);
+        for (TreeNode node : getAllNodesInOrder()) {
+            if (node.getContent() != null) {
+                sb.append(node.getContent());
+            }
+        }
         return sb.toString();
     }
 
-    public Map<String, Object> getDocumentState() {
-        Map<String, Object> state = new HashMap<>();
-        state.put("text", getText());
-        state.put("structure", getTreeStructure(root));
-        return state;
+    public List<String> getNodeIdsInOrder() {
+        List<String> nodeIds = new ArrayList<>();
+        for (TreeNode node : getAllNodesInOrder()) {
+            nodeIds.add(node.getNodeId());
+        }
+        return nodeIds;
     }
 
-    private TreeNode findParentNode(List<String> path) {
-        TreeNode current = root;
-        for (String pathElement : path) {
-            if (pathElement.equals("root")) continue;
-            current = nodeMap.get(pathElement);
-            if (current == null) return null;
-        }
-        return current;
+    public void debugPrintStructure() {
+        System.out.println("CRDT Structure:");
+        System.out.println("Content: \"" + getContent() + "\"");
+        System.out.println("Tree structure:");
+        printNode(root, 0);
+        System.out.println("---------------------");
     }
 
-    private void traverseTree(TreeNode node, StringBuilder sb) {
-        if (!node.getValue().equals("root") && node.getValue() != null) {
-            sb.append(node.getValue());
+    private void printNode(TreeNode node, int depth) {
+        StringBuilder indent = new StringBuilder();
+        for (int i = 0; i < depth; i++) {
+            indent.append("  ");
         }
+        System.out.println(indent.toString() + node.toString());
         for (TreeNode child : node.getChildren()) {
-            traverseTree(child, sb);
+            printNode(child, depth + 1);
         }
-    }
-
-    private Map<String, Object> getTreeStructure(TreeNode node) {
-        Map<String, Object> nodeInfo = new HashMap<>();
-        nodeInfo.put("value", node.getValue());
-        nodeInfo.put("nodeId", node.getNodeId());
-        nodeInfo.put("timestamp", node.getTimestamp());
-        nodeInfo.put("clientId", node.getClientId());
-
-        List<Map<String, Object>> children = new ArrayList<>();
-        for (TreeNode child : node.getChildren()) {
-            children.add(getTreeStructure(child));
-        }
-
-        if (!children.isEmpty()) {
-            nodeInfo.put("children", children);
-        }
-
-        return nodeInfo;
-    }
-
-    private static class TreeNode implements Comparable<TreeNode> {
-        private String value;
-        private String nodeId;
-        private List<TreeNode> children;
-        private long timestamp;
-        private String clientId;
-
-        public TreeNode(String value) {
-            this.value = value;
-            this.nodeId = UUID.randomUUID().toString();
-            this.children = new ArrayList<>();
-            this.timestamp = System.currentTimeMillis();
-            this.clientId = UUID.randomUUID().toString();
-        }
-
-        public void addChild(TreeNode node) {
-            children.add(node);
-            children.sort(TreeNode::compareTo);
-        }
-
-        public void removeChildById(String nodeId) {
-            children.removeIf(node -> node.getNodeId().equals(nodeId));
-        }
-
-        @Override
-        public int compareTo(TreeNode other) {
-            if (this.timestamp != other.timestamp) {
-                return Long.compare(this.timestamp, other.timestamp);
-            }
-            return this.clientId.compareTo(other.clientId);
-        }
-
-        public String getValue() { return value; }
-        public String getNodeId() { return nodeId; }
-        public void setNodeId(String nodeId) { this.nodeId = nodeId; }
-        public List<TreeNode> getChildren() { return children; }
-        public long getTimestamp() { return timestamp; }
-        public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
-        public String getClientId() { return clientId; }
-        public void setClientId(String clientId) { this.clientId = clientId; }
     }
 }

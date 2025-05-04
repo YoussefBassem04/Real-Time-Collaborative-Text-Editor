@@ -1,7 +1,6 @@
 package org.example.client;
 
 import org.example.crdt.Operation;
-import org.example.crdt.Position;
 import org.example.model.EditorMessage;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.simp.stomp.StompFrameHandler;
@@ -15,110 +14,186 @@ import org.springframework.web.socket.sockjs.client.Transport;
 import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+import javax.swing.event.UndoableEditEvent;
+import javax.swing.event.UndoableEditListener;
+import javax.swing.text.AbstractDocument;
 import javax.swing.text.BadLocationException;
-import javax.swing.text.DefaultHighlighter;
-import javax.swing.text.Highlighter;
+import javax.swing.undo.*;
 import java.awt.*;
-import java.awt.datatransfer.Clipboard;
-import java.awt.datatransfer.StringSelection;
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.*;
-import java.util.List;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.lang.reflect.Type;
+import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.List;
 
 public class EditorClient {
     private JFrame frame;
     private JTextArea textArea;
-    private JLabel statusLabel;
     private StompSession stompSession;
     private String clientId;
     private String documentId;
-    private int cursorPosition;
-    private boolean isProcessingRemoteOperation;
-    private Queue<Runnable> pendingLocalOperations;
-    private Map<String, Position> positionCache;
-    private Map<String, Highlighter.Highlight> cursorHighlights;
+    private AtomicBoolean isProcessingRemoteOperation = new AtomicBoolean(false);
+    private final Object documentLock = new Object();
+    private String previousContent = "";
+    private List<String> nodeIds = new ArrayList<>();
+    private UndoManager undoManager = new UndoManager();
+    private JButton undoButton;
+    private JButton redoButton;
+    private CollaborativeEdit lastEdit; // Track the last edit for nodeId assignment
 
     public EditorClient() {
-        this.clientId = UUID.randomUUID().toString();
-        this.cursorPosition = 0;
-        this.isProcessingRemoteOperation = false;
-        this.pendingLocalOperations = new ConcurrentLinkedQueue<>();
-        this.positionCache = new LinkedHashMap<>(100, 0.75f, true) {
-            @Override
-            protected boolean removeEldestEntry(Map.Entry eldest) {
-                return size() > 100; // Limit cache to 100 entries
-            }
-        };
-        this.cursorHighlights = new ConcurrentHashMap<>();
-        this.documentId = "Pending..."; // Temporary until connection
-
+        initializeClientInfo();
         initializeUI();
         connectToWebSocket();
     }
 
+    private void initializeClientInfo() {
+        JPanel panel = new JPanel(new GridLayout(0, 1));
+        JTextField docIdField = new JTextField(10);
+        docIdField.setText("default");
+        panel.add(new JLabel("Enter document ID to join:"));
+        panel.add(docIdField);
+
+        JRadioButton newIdButton = new JRadioButton("Generate new client ID");
+        JRadioButton existingIdButton = new JRadioButton("Use existing client ID");
+        ButtonGroup group = new ButtonGroup();
+        group.add(newIdButton);
+        group.add(existingIdButton);
+        newIdButton.setSelected(true);
+
+        panel.add(newIdButton);
+        panel.add(existingIdButton);
+
+        JTextField clientIdField = new JTextField(20);
+        clientIdField.setEnabled(false);
+        panel.add(new JLabel("Enter existing client ID:"));
+        panel.add(clientIdField);
+
+        newIdButton.addActionListener(e -> clientIdField.setEnabled(false));
+        existingIdButton.addActionListener(e -> clientIdField.setEnabled(true));
+
+        int result = JOptionPane.showConfirmDialog(null, panel,
+                "Collaborative Editor Settings", JOptionPane.OK_CANCEL_OPTION);
+
+        if (result == JOptionPane.OK_CANCEL_OPTION) {
+            System.exit(0);
+        }
+
+        this.documentId = docIdField.getText().trim();
+        if (this.documentId.isEmpty()) {
+            this.documentId = "default";
+        }
+
+        if (newIdButton.isSelected()) {
+            this.clientId = UUID.randomUUID().toString();
+        } else {
+            String inputId = clientIdField.getText().trim();
+            this.clientId = inputId.isEmpty() ? UUID.randomUUID().toString() : inputId;
+        }
+
+        System.out.println("Initializing with Client ID: " + this.clientId);
+        System.out.println("Joining Document ID: " + this.documentId);
+    }
+
     private void initializeUI() {
-        frame = new JFrame("Collaborative Editor - " + clientId.substring(0, 8));
+        frame = new JFrame("Collaborative Editor - Doc: " + documentId + " - Client: " + clientId.substring(0, 8));
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(800, 600);
-
+        undoButton = new JButton("Undo");
+        redoButton = new JButton("Redo");
         textArea = new JTextArea();
         textArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
         textArea.setLineWrap(true);
         textArea.setWrapStyleWord(true);
 
-        JMenuBar menuBar = new JMenuBar();
-        JMenu fileMenu = new JMenu("File");
-        JMenuItem importItem = new JMenuItem("Import TXT");
-        JMenuItem exportItem = new JMenuItem("Export TXT");
-        JMenuItem syncItem = new JMenuItem("Force Sync");
-        JMenuItem copyIdItem = new JMenuItem("Copy Document ID");
-        importItem.addActionListener(e -> importFile());
-        exportItem.addActionListener(e -> exportFile());
-        syncItem.addActionListener(e -> requestFullSync());
-        copyIdItem.addActionListener(e -> copyDocumentIdToClipboard());
-        fileMenu.add(importItem);
-        fileMenu.add(exportItem);
-        fileMenu.add(syncItem);
-        fileMenu.add(copyIdItem);
-        menuBar.add(fileMenu);
-
-        statusLabel = new JLabel("Document ID: " + documentId + " | Clients: 1");
-        JPanel statusPanel = new JPanel(new BorderLayout());
-        statusPanel.add(statusLabel, BorderLayout.WEST);
-
-        textArea.addKeyListener(new java.awt.event.KeyAdapter() {
+        // Custom UndoableEditListener to wrap edits in CollaborativeEdit
+        textArea.getDocument().addUndoableEditListener(new UndoableEditListener() {
             @Override
-            public void keyTyped(java.awt.event.KeyEvent e) {
-                if (!isProcessingRemoteOperation) {
-                    handleLocalEdit(e.getKeyChar());
-                } else {
-                    pendingLocalOperations.offer(() -> handleLocalEdit(e.getKeyChar()));
+            public void undoableEditHappened(UndoableEditEvent e) {
+                if (!isProcessingRemoteOperation.get()) {
+                    lastEdit = new CollaborativeEdit(e.getEdit());
+                    undoManager.addEdit(lastEdit);
                 }
-            }
-
-            @Override
-            public void keyPressed(java.awt.event.KeyEvent e) {
-                if (e.getKeyCode() == java.awt.event.KeyEvent.VK_BACK_SPACE && !isProcessingRemoteOperation) {
-                    handleLocalDelete();
-                } else if (e.getKeyCode() == java.awt.event.KeyEvent.VK_BACK_SPACE) {
-                    pendingLocalOperations.offer(EditorClient.this::handleLocalDelete);
-                }
+                updateButtonStates();
             }
         });
 
-        textArea.addCaretListener(e -> updateCursorPosition());
+        textArea.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent e) {
+                if (!isProcessingRemoteOperation.get()) {
+                    try {
+                        int offset = e.getOffset();
+                        int length = e.getLength();
+                        String insertedText = textArea.getText(offset, length);
+                        handleLocalInsert(insertedText, offset);
+                    } catch (BadLocationException ex) {
+                        ex.printStackTrace();
+                    }
+                }
+            }
 
+            @Override
+            public void removeUpdate(DocumentEvent e) {
+                if (!isProcessingRemoteOperation.get()) {
+                    int offset = e.getOffset();
+                    int length = e.getLength();
+                    handleLocalDelete(offset, length);
+                }
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent e) {
+                // Not used for plain text
+            }
+        });
+
+        undoButton.addActionListener(e -> {
+            try {
+                if (undoManager.canUndo()) {
+                    undoManager.undo();
+                    System.out.println("Performed undo: " + undoManager.getUndoPresentationName());
+                    updateButtonStates();
+                }
+            } catch (CannotUndoException ex) {
+                ex.printStackTrace();
+            }
+        });
+
+        redoButton.addActionListener(e -> {
+            try {
+                if (undoManager.canRedo()) {
+                    undoManager.redo();
+                    System.out.println("Performed redo: " + undoManager.getRedoPresentationName());
+                    updateButtonStates();
+                }
+            } catch (CannotRedoException ex) {
+                ex.printStackTrace();
+            }
+        });
+
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonPanel.add(undoButton);
+        buttonPanel.add(redoButton);
+
+        frame.add(buttonPanel, BorderLayout.NORTH);
         JScrollPane scrollPane = new JScrollPane(textArea);
-        frame.setLayout(new BorderLayout());
+        JPanel statusPanel = new JPanel(new BorderLayout());
+        JLabel statusLabel = new JLabel(" Connected as: " + clientId.substring(0, 8) + " | Document: " + documentId);
+        statusPanel.add(statusLabel, BorderLayout.WEST);
+
         frame.add(scrollPane, BorderLayout.CENTER);
         frame.add(statusPanel, BorderLayout.SOUTH);
-        frame.setJMenuBar(menuBar);
         frame.setVisible(true);
+        updateButtonStates();
+    }
+
+    private void updateButtonStates() {
+        undoButton.setEnabled(undoManager.canUndo());
+        redoButton.setEnabled(undoManager.canRedo());
+        undoButton.setToolTipText(undoManager.canUndo() ? "Undo " + undoManager.getUndoPresentationName() : null);
+        redoButton.setToolTipText(undoManager.canRedo() ? "Redo " + undoManager.getRedoPresentationName() : null);
     }
 
     private void connectToWebSocket() {
@@ -133,7 +208,8 @@ public class EditorClient {
                 System.out.println("✅ Connected to WebSocket");
                 stompSession = session;
 
-                session.subscribe("/topic/editor", new StompFrameHandler() {
+                String topic = "/topic/editor/" + documentId;
+                session.subscribe(topic, new StompFrameHandler() {
                     @Override
                     public Type getPayloadType(StompHeaders headers) {
                         return EditorMessage.class;
@@ -142,307 +218,341 @@ public class EditorClient {
                     @Override
                     public void handleFrame(StompHeaders headers, Object payload) {
                         EditorMessage msg = (EditorMessage) payload;
+                        System.out.println("⇦ [" + topic + "] Received: " + msg);
                         handleRemoteMessage(msg);
                     }
                 });
 
-                // Prompt for document ID after connection
-                SwingUtilities.invokeLater(() -> {
-                    String input = JOptionPane.showInputDialog(frame,
-                            "Enter Document ID to join an existing session or leave blank to create a new document:",
-                            "Join Document", JOptionPane.QUESTION_MESSAGE);
-                    if (input == null || input.trim().isEmpty()) {
-                        documentId = UUID.randomUUID().toString(); // Temporary
-                        requestNewDocument();
-                    } else {
-                        documentId = input;
-                        EditorMessage syncRequest = new EditorMessage();
-                        syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
-                        syncRequest.setClientId(clientId);
-                        syncRequest.setDocumentId(documentId);
-                        session.send("/app/editor/operation", syncRequest);
-                        statusLabel.setText("Document ID: " + documentId + " | Clients: 1");
-                    }
-                });
+                EditorMessage syncRequest = new EditorMessage();
+                syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
+                syncRequest.setClientId(clientId);
+                syncRequest.setDocumentId(documentId);
+                session.send("/app/editor/operation", syncRequest);
+                System.out.println("⇨ Sent SYNC_REQUEST for document: " + documentId);
             }
 
             @Override
             public void handleTransportError(StompSession session, Throwable exception) {
-                SwingUtilities.invokeLater(() ->
-                        statusLabel.setText("Disconnected: " + exception.getMessage() + " | Document ID: " + documentId));
-                JOptionPane.showMessageDialog(frame, "Connection error: " + exception.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                System.err.println("❌ Transport error: " + exception.getMessage());
+                exception.printStackTrace();
+                SwingUtilities.invokeLater(() -> {
+                    JOptionPane.showMessageDialog(frame,
+                            "Connection error: " + exception.getMessage(),
+                            "Connection Error",
+                            JOptionPane.ERROR_MESSAGE);
+                });
             }
         });
     }
 
-    private void copyDocumentIdToClipboard() {
-        if (documentId == null || documentId.equals("Pending...")) {
-            JOptionPane.showMessageDialog(frame, "No document ID available yet.", "Error", JOptionPane.ERROR_MESSAGE);
-            return;
+    private void handleLocalInsert(String text, int position) {
+        synchronized (documentLock) {
+            try {
+                List<String> path = calculatePathForPosition(position);
+                long timestamp = System.currentTimeMillis();
+                Operation op = new Operation(
+                        Operation.Type.INSERT,
+                        text,
+                        path,
+                        timestamp,
+                        clientId);
+
+                EditorMessage message = new EditorMessage();
+                message.setType(EditorMessage.MessageType.OPERATION);
+                message.setClientId(clientId);
+                message.setDocumentId(documentId);
+                message.setOperation(op);
+
+                List<String> tempNodeIds = new ArrayList<>();
+                for (int i = 0; i < text.length(); i++) {
+                    tempNodeIds.add("temp:" + timestamp + ":" + i);
+                }
+                nodeIds.addAll(position, tempNodeIds);
+                if (lastEdit != null && lastEdit.isInsert && lastEdit.position == position
+                        && lastEdit.content.equals(text)) {
+                    lastEdit.setAffectedNodeIds(tempNodeIds);
+                }
+                previousContent = textArea.getText();
+
+                System.out.println("⇨ Sending INSERT operation: '" + text + "' at position " + position +
+                        ", Path: " + path);
+                stompSession.send("/app/editor/operation", message);
+            } catch (Exception e) {
+                System.err.println("Error handling insert: " + e.getMessage());
+                e.printStackTrace();
+            }
         }
-        StringSelection selection = new StringSelection(documentId);
-        Clipboard clipboard = Toolkit.getDefaultToolkit().getSystemClipboard();
-        clipboard.setContents(selection, null);
-        JOptionPane.showMessageDialog(frame, "Document ID copied to clipboard: " + documentId, "Success", JOptionPane.INFORMATION_MESSAGE);
     }
 
-    private void handleLocalEdit(char c) {
-        if (!Character.isDefined(c) || c == '\n') return; // Ignore invalid chars
-        Position pos = calculatePositionForIndex(cursorPosition);
-        List<String> path = positionToPath(pos);
+    private void handleLocalDelete(int position, int length) {
+        synchronized (documentLock) {
+            try {
+                List<String> deletedNodeIds = new ArrayList<>();
+                StringBuilder deletedText = new StringBuilder();
+                for (int i = 0; i < length && position + i < nodeIds.size(); i++) {
+                    String nodeId = nodeIds.get(position + i);
+                    List<String> path = new ArrayList<>();
+                    path.add(nodeId);
+                    String deletedChar = String.valueOf(previousContent.charAt(position + i));
+                    Operation op = new Operation(
+                            Operation.Type.DELETE,
+                            deletedChar,
+                            path,
+                            System.currentTimeMillis(),
+                            clientId);
 
-        Operation op = new Operation(Operation.Type.INSERT, String.valueOf(c), path, clientId);
-        EditorMessage message = new EditorMessage();
-        message.setType(EditorMessage.MessageType.OPERATION);
-        message.setOperations(List.of(op));
-        message.setClientId(clientId);
-        message.setDocumentId(documentId);
-        stompSession.send("/app/editor/operation", message);
+                    EditorMessage message = new EditorMessage();
+                    message.setType(EditorMessage.MessageType.OPERATION);
+                    message.setClientId(clientId);
+                    message.setDocumentId(documentId);
+                    message.setOperation(op);
 
-        cursorPosition++;
-    }
+                    deletedNodeIds.add(nodeId);
+                    deletedText.append(deletedChar);
 
-    private void handleLocalDelete() {
-        if (cursorPosition == 0 || cursorPosition > textArea.getText().length()) {
-            return;
-        }
+                    System.out.println("⇨ Sending DELETE operation for char '" + deletedChar +
+                            "' at position " + (position + i) + ", NodeId: " + nodeId);
+                    stompSession.send("/app/editor/operation", message);
+                }
 
-        Position pos = calculatePositionForIndex(cursorPosition - 1);
-        List<String> path = positionToPath(pos);
-        String currentText = textArea.getText();
-        if (cursorPosition - 1 >= currentText.length()) {
-            return;
-        }
-        String contentToDelete = currentText.substring(cursorPosition - 1, cursorPosition);
-
-        Operation op = new Operation(Operation.Type.DELETE, contentToDelete, path, clientId);
-        EditorMessage message = new EditorMessage();
-        message.setType(EditorMessage.MessageType.OPERATION);
-        message.setOperations(List.of(op));
-        message.setClientId(clientId);
-        message.setDocumentId(documentId);
-        stompSession.send("/app/editor/operation", message);
-
-        cursorPosition--;
-    }
-
-    private void updateCursorPosition() {
-        int newPos = textArea.getCaretPosition();
-        if (newPos != cursorPosition) {
-            cursorPosition = newPos;
-            EditorMessage cursorMessage = new EditorMessage();
-            cursorMessage.setType(EditorMessage.MessageType.CURSOR_UPDATE);
-            cursorMessage.setClientId(clientId);
-            cursorMessage.setDocumentId(documentId);
-            cursorMessage.setCursorPosition(cursorPosition);
-            stompSession.send("/app/editor/operation", cursorMessage);
+                nodeIds.subList(position, Math.min(position + length, nodeIds.size())).clear();
+                if (lastEdit != null && !lastEdit.isInsert && lastEdit.position == position) {
+                    lastEdit.setAffectedNodeIds(deletedNodeIds);
+                    lastEdit.setContent(deletedText.toString());
+                }
+                previousContent = textArea.getText();
+            } catch (Exception e) {
+                System.err.println("Error handling delete: " + e.getMessage());
+                e.printStackTrace();
+            }
         }
     }
 
     private void handleRemoteMessage(EditorMessage message) {
+        if (!documentId.equals(message.getDocumentId()))
+            return;
+
         SwingUtilities.invokeLater(() -> {
-            isProcessingRemoteOperation = true;
-            try {
-                if (message.getType() == EditorMessage.MessageType.OPERATION &&
-                        !message.getClientId().equals(clientId)) {
-                    for (Operation op : message.getOperations()) {
-                        int pos = calculateIndexFromPosition(pathToPosition(op.getPath()));
+            synchronized (documentLock) {
+                try {
+                    isProcessingRemoteOperation.set(true);
+                    int caretPos = textArea.getCaretPosition();
+
+                    if (message.getType() == EditorMessage.MessageType.OPERATION) {
+                        Operation op = message.getOperation();
+                        int pos = calculatePositionFromPath(op.getPath());
+
+                        System.out.println("Applying remote operation: " + op.getType() +
+                                ", Content: '" + op.getContent() + "', Path: " + op.getPath() +
+                                ", Position: " + pos);
+
                         if (op.getType() == Operation.Type.INSERT) {
-                            textArea.insert(op.getContent(), pos);
-                            if (pos <= cursorPosition) {
-                                cursorPosition += op.getContent().length();
-                            }
-                        } else if (op.getType() == Operation.Type.DELETE) {
-                            String currentText = textArea.getText();
-                            if (pos >= 0 && pos < currentText.length()) {
-                                int endPos = Math.min(pos + op.getContent().length(), currentText.length());
-                                String toDelete = currentText.substring(pos, endPos);
-                                if (toDelete.equals(op.getContent())) {
-                                    textArea.replaceRange("", pos, endPos);
-                                    if (pos < cursorPosition) {
-                                        cursorPosition = Math.max(0, cursorPosition - op.getContent().length());
-                                    }
-                                } else {
-                                    requestFullSync();
+                            List<String> serverNodeIds = message.getNodeIds();
+                            if (serverNodeIds == null || serverNodeIds.isEmpty()
+                                    || serverNodeIds.size() != op.getContent().length()) {
+                                serverNodeIds = new ArrayList<>();
+                                long timestamp = op.getTimestamp();
+                                for (int i = 0; i < op.getContent().length(); i++) {
+                                    serverNodeIds.add(op.getClientId() + ":" + (timestamp + i));
                                 }
                             }
+                            int tempIndex = nodeIds.indexOf("temp:" + op.getTimestamp() + ":0");
+                            if (tempIndex >= 0) {
+                                nodeIds.subList(tempIndex, tempIndex + op.getContent().length()).clear();
+                                nodeIds.addAll(tempIndex, serverNodeIds);
+                            } else if (!op.getClientId().equals(clientId)) {
+                                textArea.insert(op.getContent(), pos);
+                                nodeIds.addAll(pos, serverNodeIds);
+                                if (pos <= caretPos) {
+                                    textArea.setCaretPosition(caretPos + op.getContent().length());
+                                }
+                            }
+                        } else if (op.getType() == Operation.Type.DELETE && !op.getClientId().equals(clientId)) {
+                            if (pos >= 0 && pos < nodeIds.size()) {
+                                textArea.replaceRange("", pos, pos + 1);
+                                nodeIds.remove(pos);
+                                if (pos < caretPos) {
+                                    textArea.setCaretPosition(Math.max(pos, caretPos - 1));
+                                }
+                            } else {
+                                System.err.println(
+                                        "Invalid DELETE position: " + pos + ", nodeIds size: " + nodeIds.size());
+                            }
                         }
+                        previousContent = textArea.getText();
+                    } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
+                        String content = message.getContent();
+                        List<String> serverNodeIds = message.getNodeIds();
+                        nodeIds.clear();
+                        if (content != null) {
+                            textArea.setText(content);
+                            previousContent = content;
+                            if (serverNodeIds != null && serverNodeIds.size() == content.length()) {
+                                nodeIds.addAll(serverNodeIds);
+                            } else {
+                                for (int i = 0; i < content.length(); i++) {
+                                    nodeIds.add("sync:" + i);
+                                }
+                            }
+                        } else {
+                            textArea.setText("");
+                            previousContent = "";
+                        }
+                        textArea.setCaretPosition(Math.min(caretPos, textArea.getDocument().getLength()));
                     }
-                } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
-                    textArea.setText(message.getContent());
-                    cursorPosition = Math.min(cursorPosition, message.getContent().length());
-                    textArea.setCaretPosition(cursorPosition);
-                    positionCache.clear();
-                } else if (message.getType() == EditorMessage.MessageType.CREATE_DOCUMENT_RESPONSE) {
-                    documentId = message.getDocumentId();
-                    statusLabel.setText("Document ID: " + documentId + " | Clients: 1");
-
-                    // Custom dialog with Copy ID button
-                    JDialog dialog = new JDialog(frame, "Document Created", true);
-                    dialog.setLayout(new BorderLayout());
-                    dialog.setSize(400, 150);
-                    dialog.setLocationRelativeTo(frame);
-
-                    JLabel messageLabel = new JLabel("New document created. Share this ID: " + documentId);
-                    messageLabel.setHorizontalAlignment(SwingConstants.CENTER);
-                    dialog.add(messageLabel, BorderLayout.CENTER);
-
-                    JPanel buttonPanel = new JPanel();
-                    JButton copyButton = new JButton("Copy ID");
-                    JButton okButton = new JButton("OK");
-                    copyButton.addActionListener(e -> copyDocumentIdToClipboard());
-                    okButton.addActionListener(e -> dialog.dispose());
-                    buttonPanel.add(copyButton);
-                    buttonPanel.add(okButton);
-                    dialog.add(buttonPanel, BorderLayout.SOUTH);
-
-                    dialog.setVisible(true);
-
-                    EditorMessage syncRequest = new EditorMessage();
-                    syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
-                    syncRequest.setClientId(clientId);
-                    syncRequest.setDocumentId(documentId);
-                    stompSession.send("/app/editor/operation", syncRequest);
-                } else if (message.getType() == EditorMessage.MessageType.CURSOR_UPDATE &&
-                        !message.getClientId().equals(clientId)) {
-                    updateRemoteCursor(message.getClientId(), message.getCursorPosition());
+                    updateButtonStates();
+                } catch (Exception e) {
+                    System.err.println("Error handling remote message: " + e.getMessage());
+                    e.printStackTrace();
+                } finally {
+                    isProcessingRemoteOperation.set(false);
                 }
-            } finally {
-                isProcessingRemoteOperation = false;
-                processPendingOperations();
-                updateStatus();
             }
         });
     }
 
-    private void updateRemoteCursor(String clientId, int position) {
-        Highlighter highlighter = textArea.getHighlighter();
-        highlighter.removeHighlight(cursorHighlights.getOrDefault(clientId, null));
-        try {
-            if (position >= 0 && position <= textArea.getText().length()) {
-                Color color = new Color(clientId.hashCode() % 256, 128, 128, 128); // Semi-transparent color
-                Highlighter.Highlight highlight = (Highlighter.Highlight) highlighter.addHighlight(
-                        position, position + 1, new DefaultHighlighter.DefaultHighlightPainter(color));
-                cursorHighlights.put(clientId, highlight);
+    private List<String> calculatePathForPosition(int position) {
+        synchronized (documentLock) {
+            List<String> path = new ArrayList<>();
+            if (position == 0) {
+                path.add("0:" + clientId);
+            } else if (position >= nodeIds.size()) {
+                path.add((nodeIds.size()) + ":" + clientId);
+            } else {
+                path.add(position + ":" + clientId);
             }
-        } catch (BadLocationException e) {
-            System.err.println("Invalid cursor position: " + position);
+            return path;
         }
     }
 
-    private void updateStatus() {
-        statusLabel.setText("Document ID: " + documentId + " | Clients: " + (cursorHighlights.size() + 1));
-    }
-
-    private void requestFullSync() {
-        EditorMessage syncRequest = new EditorMessage();
-        syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
-        syncRequest.setClientId(clientId);
-        syncRequest.setDocumentId(documentId);
-        stompSession.send("/app/editor/operation", syncRequest);
-    }
-
-    private void processPendingOperations() {
-        while (!pendingLocalOperations.isEmpty() && !isProcessingRemoteOperation) {
-            Runnable operation = pendingLocalOperations.poll();
-            if (operation != null) {
-                operation.run();
+    private int calculatePositionFromPath(List<String> path) {
+        synchronized (documentLock) {
+            if (path == null || path.isEmpty())
+                return 0;
+            String pathElement = path.get(0);
+            int index = nodeIds.indexOf(pathElement);
+            if (index >= 0) {
+                return index;
             }
-        }
-    }
-
-    private Position calculatePositionForIndex(int index) {
-        String document = textArea.getText();
-        if (document.isEmpty() || index <= 0) {
-            return new Position();
-        }
-
-        String cacheKey = index + ":" + document.hashCode();
-        return positionCache.computeIfAbsent(cacheKey, k -> {
-            // Generate a fractional index based on position in document
-            double fraction = (double) index / (document.length() + 1);
-            List<Position.Identifier> identifiers = new ArrayList<>();
-            identifiers.add(new Position.Identifier(fraction, clientId));
-            return new Position(identifiers);
-        });
-    }
-
-    private List<String> positionToPath(Position pos) {
-        List<String> path = new ArrayList<>();
-        path.add("root");
-        for (Position.Identifier id : pos.getPath()) {
-            path.add(id.getFraction() + ":" + id.getClientId());
-        }
-        return path;
-    }
-
-    private Position pathToPosition(List<String> path) {
-        List<Position.Identifier> identifiers = new ArrayList<>();
-        for (String segment : path) {
-            if (segment.equals("root")) continue;
-            String[] parts = segment.split(":");
-            if (parts.length == 2) {
-                identifiers.add(new Position.Identifier(Double.parseDouble(parts[0]), parts[1]));
-            }
-        }
-        return new Position(identifiers);
-    }
-
-    private int calculateIndexFromPosition(Position pos) {
-        String document = textArea.getText();
-        if (pos.getPath().isEmpty()) {
-            return 0;
-        }
-        // Approximate index based on last fraction
-        double fraction = pos.getPath().get(pos.getPath().size() - 1).getFraction();
-        return Math.min((int) (fraction * (document.length() + 1)), document.length());
-    }
-
-    private void importFile() {
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text Files", "txt"));
-        if (fileChooser.showOpenDialog(frame) == JFileChooser.APPROVE_OPTION) {
             try {
-                String content = Files.readString(fileChooser.getSelectedFile().toPath());
-                textArea.setText(content);
-                cursorPosition = 0;
-                textArea.setCaretPosition(0);
-                positionCache.clear();
-
-                EditorMessage syncRequest = new EditorMessage();
-                syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
-                syncRequest.setClientId(clientId);
-                syncRequest.setContent(content);
-                syncRequest.setDocumentId(documentId);
-                stompSession.send("/app/editor/operation", syncRequest);
-            } catch (IOException e) {
-                JOptionPane.showMessageDialog(frame, "Error importing file: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                String[] parts = pathElement.split(":");
+                int pathPos = Integer.parseInt(parts[0]);
+                return Math.min(pathPos, nodeIds.size());
+            } catch (NumberFormatException e) {
+                System.err.println("Invalid path format: " + pathElement);
+                return nodeIds.size();
             }
         }
     }
 
-    private void exportFile() {
-        JFileChooser fileChooser = new JFileChooser();
-        fileChooser.setFileFilter(new javax.swing.filechooser.FileNameExtensionFilter("Text Files", "txt"));
-        if (fileChooser.showSaveDialog(frame) == JFileChooser.APPROVE_OPTION) {
+    private Operation transformOperation(Operation op) {
+        synchronized (documentLock) {
+            return op;
+        }
+    }
+
+    // Custom UndoableEdit to handle collaborative operations
+    private class CollaborativeEdit extends AbstractUndoableEdit {
+        private final UndoableEdit originalEdit;
+        private List<String> affectedNodeIds;
+        private String content;
+        private int position;
+        private boolean isInsert;
+
+        public CollaborativeEdit(UndoableEdit edit) {
+            this.originalEdit = edit;
+            this.affectedNodeIds = new ArrayList<>();
             try {
-                Path path = fileChooser.getSelectedFile().toPath();
-                if (!path.toString().endsWith(".txt")) {
-                    path = Path.of(path.toString() + ".txt");
+                if (edit instanceof AbstractDocument.DefaultDocumentEvent) {
+                    AbstractDocument.DefaultDocumentEvent docEvent = (AbstractDocument.DefaultDocumentEvent) edit;
+                    position = docEvent.getOffset();
+                    if (docEvent.getType() == DocumentEvent.EventType.INSERT) {
+                        isInsert = true;
+                        content = textArea.getText(position, docEvent.getLength());
+                    } else if (docEvent.getType() == DocumentEvent.EventType.REMOVE) {
+                        isInsert = false;
+                        content = previousContent.substring(position, position + docEvent.getLength());
+                    }
                 }
-                Files.writeString(path, textArea.getText());
-                JOptionPane.showMessageDialog(frame, "File exported successfully", "Success", JOptionPane.INFORMATION_MESSAGE);
-            } catch (IOException e) {
-                JOptionPane.showMessageDialog(frame, "Error exporting file: " + e.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+            } catch (BadLocationException e) {
+                e.printStackTrace();
             }
         }
-    }
 
-    private void requestNewDocument() {
-        EditorMessage createDocMessage = new EditorMessage();
-        createDocMessage.setType(EditorMessage.MessageType.CREATE_DOCUMENT);
-        createDocMessage.setClientId(clientId);
-        stompSession.send("/app/editor/operation", createDocMessage);
+        public void setAffectedNodeIds(List<String> nodeIds) {
+            this.affectedNodeIds = new ArrayList<>(nodeIds);
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
+
+        @Override
+        public void undo() throws CannotUndoException {
+            synchronized (documentLock) {
+                try {
+                    super.undo();
+                    if (isInsert) {
+                        System.out.println("Undoing INSERT: Removing '" + content + "' at position " + position);
+                        textArea.getDocument().remove(position, content.length());
+                        nodeIds.subList(position, position + content.length()).clear();
+                    } else {
+                        System.out.println("Undoing DELETE: Restoring '" + content + "' at position " + position);
+                        textArea.getDocument().insertString(position, content, null);
+                        nodeIds.addAll(position, affectedNodeIds);
+                    }
+                    previousContent = textArea.getText();
+                } catch (BadLocationException e) {
+                    throw new CannotUndoException();
+                }
+            }
+        }
+
+        @Override
+        public void redo() throws CannotRedoException {
+            synchronized (documentLock) {
+                try {
+                    super.redo();
+                    if (isInsert) {
+                        System.out.println("Redoing INSERT: Reinserting '" + content + "' at position " + position);
+                        textArea.getDocument().insertString(position, content, null);
+                        nodeIds.addAll(position, affectedNodeIds);
+                    } else {
+                        System.out.println("Redoing DELETE: Removing '" + content + "' at position " + position);
+                        textArea.getDocument().remove(position, content.length());
+                        nodeIds.subList(position, position + content.length()).clear();
+                    }
+                    previousContent = textArea.getText();
+                } catch (BadLocationException e) {
+                    throw new CannotRedoException();
+                }
+            }
+        }
+
+        @Override
+        public String getPresentationName() {
+            return isInsert ? "insertion" : "deletion";
+        }
+
+        @Override
+        public String getUndoPresentationName() {
+            return "Undo " + getPresentationName() + " of '" + content + "'";
+        }
+
+        @Override
+        public String getRedoPresentationName() {
+            return "Redo " + getPresentationName() + " of '" + content + "'";
+        }
+
+        @Override
+        public boolean canUndo() {
+            return originalEdit.canUndo();
+        }
+
+        @Override
+        public boolean canRedo() {
+            return originalEdit.canRedo();
+        }
     }
 
     public static void main(String[] args) {
