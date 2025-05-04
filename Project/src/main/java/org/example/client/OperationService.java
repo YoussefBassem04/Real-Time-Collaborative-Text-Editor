@@ -21,6 +21,10 @@ public class OperationService {
     private final List<Integer> pendingDeleteLengths = new ArrayList<>();
     private TextArea textArea;
 
+    public TextArea getTextArea() {
+        return textArea;
+    }
+
     public OperationService(EditorController controller) {
         this.controller = controller;
         this.documentState = controller.getDocumentState();
@@ -278,22 +282,19 @@ public class OperationService {
     public void applyLocalInsert(Operation op) {
         int pos = calculatePositionFromPath(op.getPath());
         pos = Math.max(0, Math.min(pos, textArea.getText().length()));
-
+    
         List<String> charIds = new ArrayList<>();
         for (int i = 0; i < op.getContent().length(); i++) {
             charIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
         }
-
+    
         String currentText = textArea.getText();
         String newText = currentText.substring(0, pos) + op.getContent() + currentText.substring(pos);
         textArea.setText(newText);
         documentState.getCharacterIds().addAll(pos, charIds);
         documentState.setPreviousContent(newText);
     }
-
-    /**
-     * Apply a local delete operation generated during undo/redo
-     */
+    
     public void applyLocalDelete(Operation op) {
         Set<Integer> positionsToDelete = new TreeSet<>(Collections.reverseOrder());
         for (String pathEntry : op.getPath()) {
@@ -305,7 +306,12 @@ public class OperationService {
                 }
             }
         }
-
+    
+        if (positionsToDelete.isEmpty()) {
+            System.out.println("WARNING: No valid positions found for local delete operation");
+            return;
+        }
+    
         StringBuilder sb = new StringBuilder(textArea.getText());
         for (int pos : positionsToDelete) {
             if (pos >= 0 && pos < sb.length()) {
