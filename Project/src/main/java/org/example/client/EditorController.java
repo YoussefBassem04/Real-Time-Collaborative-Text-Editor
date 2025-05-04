@@ -31,6 +31,9 @@ public class EditorController {
     }
 
     public void handleRemoteMessage(EditorMessage message) {
+        if (message.getType() == EditorMessage.MessageType.USER_LIST && message.getConnectedUsers() != null) {
+            documentState.getConnectedUsers().setAll(message.getConnectedUsers());
+        }
         operationService.handleRemoteMessage(message);
     }
 

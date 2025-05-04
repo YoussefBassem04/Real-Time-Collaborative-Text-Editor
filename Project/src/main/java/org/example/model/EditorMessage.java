@@ -8,7 +8,8 @@ public class EditorMessage {
     public enum MessageType {
         SYNC_REQUEST,
         SYNC_RESPONSE,
-        OPERATION
+        OPERATION,
+        USER_LIST
     }
 
     private MessageType type;
@@ -16,9 +17,9 @@ public class EditorMessage {
     private String documentId;
     private String content;
     private Operation operation;
-    private List<String> characterIds;  // Added field for character IDs
+    private List<String> characterIds;
+    private List<String> connectedUsers;
 
-    // Getters and setters
     public MessageType getType() {
         return type;
     }
@@ -67,6 +68,14 @@ public class EditorMessage {
         this.characterIds = characterIds;
     }
 
+    public List<String> getConnectedUsers() {
+        return connectedUsers;
+    }
+
+    public void setConnectedUsers(List<String> connectedUsers) {
+        this.connectedUsers = connectedUsers;
+    }
+
     @Override
     public String toString() {
         return "EditorMessage{" +
@@ -76,6 +85,7 @@ public class EditorMessage {
                 ", content='" + (content != null ? (content.length() > 20 ? content.substring(0, 20) + "..." : content) : null) + '\'' +
                 ", operation=" + operation +
                 ", characterIds=" + (characterIds != null ? characterIds.size() : 0) + " ids" +
+                ", connectedUsers=" + (connectedUsers != null ? connectedUsers.size() : 0) + " users" +
                 '}';
     }
 }

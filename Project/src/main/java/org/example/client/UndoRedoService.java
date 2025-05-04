@@ -1,17 +1,13 @@
 package org.example.client;
 
 import org.example.crdt.Operation;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.Deque;
-import java.util.List;
-import java.util.HashMap;
-import java.util.Map;
+
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class UndoRedoService {
     private static final int MAX_UNDO_HISTORY = 100;
-
+    private final Set<String> deletedCharIds = new HashSet<>();
     // Stacks to store operations for undo/redo
     private final Deque<Operation> undoStack = new ArrayDeque<>();
     private final Deque<Operation> redoStack = new ArrayDeque<>();
@@ -145,10 +141,19 @@ public class UndoRedoService {
     private Operation createInverseOperation(Operation op) {
         if (op.getType() == Operation.Type.INSERT) {
             // For insert operations, create a delete operation
+            List<String> deleteCharPaths = generateDeletePaths(op);
+
+            // Track these character IDs for sync verification
+            for (String path : deleteCharPaths) {
+                if (path.startsWith("char-")) {
+                    deletedCharIds.add(path.substring(5));
+                }
+            }
+
             return new Operation(
                     Operation.Type.DELETE,
                     op.getContent(),
-                    generateDeletePaths(op),
+                    deleteCharPaths,
                     System.currentTimeMillis(),
                     controller.getDocumentState().getClientId()
             );
@@ -294,7 +299,16 @@ public class UndoRedoService {
                 }
             }
         } else if (op.getType() == Operation.Type.DELETE) {
+            // Track the deleted IDs before removal
+            for (String pathEntry : op.getPath()) {
+                if (pathEntry.startsWith("char-")) {
+                    String charId = pathEntry.substring(5);
+                    deletedCharIds.add(charId);
+                }
+            }
+
             controller.getOperationService().applyLocalDelete(op);
+
             // Remove deleted character IDs from document state
             List<String> charIdsToRemove = op.getPath().stream()
                     .filter(p -> p.startsWith("char-"))
@@ -303,9 +317,39 @@ public class UndoRedoService {
             controller.getDocumentState().getCharacterIds().removeAll(charIdsToRemove);
         }
 
+        // Send the operation to other clients
         controller.getNetworkService().sendOperation(op);
+
+        // If this was a mass deletion, check if we need to send a full sync
+        checkAndSyncDocument(op);
+
         isApplyingOperation = false;
         return newCharIds;
+    }
+    private void checkAndSyncDocument(Operation op) {
+        if (op.getType() == Operation.Type.DELETE) {
+            // Check if this was a "delete all" operation by comparing content length to deleted chars
+            List<String> currentCharIds = controller.getDocumentState().getCharacterIds();
+            if (currentCharIds.isEmpty() || (deletedCharIds.size() > 5 && op.getContent().length() > 5)) {
+                // Create a sync operation to ensure all clients have the same state
+                Operation syncOp = new Operation(
+                        Operation.Type.SYNC,
+                        controller.getOperationService().getTextArea().getText(),
+                        null,
+                        System.currentTimeMillis(),
+                        controller.getDocumentState().getClientId()
+                );
+
+                // Add character IDs to the sync operation
+                syncOp.setCharacterIds(new ArrayList<>(currentCharIds));
+
+                // Send the sync operation
+                controller.getNetworkService().sendOperation(syncOp);
+
+                // Clear deleted IDs after sync
+                deletedCharIds.clear();
+            }
+        }
     }
 
     /**
@@ -354,7 +398,13 @@ public class UndoRedoService {
             undoStack.removeLast();
         }
     }
-
+    public void resetState() {
+        undoStack.clear();
+        redoStack.clear();
+        charIdMapping.clear();
+        characterPositionCache.clear();
+        deletedCharIds.clear();
+    }
     public boolean isUndoRedoOperation() {
         return isUndoRedoOperation;
     }

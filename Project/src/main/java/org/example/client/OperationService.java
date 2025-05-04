@@ -210,6 +210,7 @@ public class OperationService {
     private void handleLocalDelete(int position, int length) {
         int endPos = Math.min(position + length, documentState.getCharacterIds().size());
         int actualLength = endPos - position;
+        boolean isMassDelete = (actualLength > documentState.getCharacterIds().size() * 0.5);
 
         List<String> deletedCharIds = new ArrayList<>();
         for (int i = position; i < endPos; i++) {
@@ -242,6 +243,19 @@ public class OperationService {
         documentState.getOperationQueue().add(operation);
         documentState.getCharacterIds().subList(position, endPos).clear();
         documentState.setPreviousContent(textArea.getText());
+
+        // If this was a mass deletion (e.g., select all + delete), create a full sync
+        if (isMassDelete) {
+            Operation syncOp = new Operation(
+                    Operation.Type.SYNC,
+                    textArea.getText(),
+                    null,
+                    System.currentTimeMillis(),
+                    documentState.getClientId()
+            );
+            syncOp.setCharacterIds(new ArrayList<>(documentState.getCharacterIds()));
+            documentState.getOperationQueue().add(syncOp);
+        }
     }
 
     private void flushOperations() {
@@ -373,6 +387,9 @@ public class OperationService {
             if (op.getCharacterIds() != null && !op.getCharacterIds().isEmpty()) {
                 documentState.getCharacterIds().clear();
                 documentState.getCharacterIds().addAll(op.getCharacterIds());
+
+                // Reset the undo/redo state when receiving a full sync
+                controller.getUndoRedoService().resetState();
             } else {
                 // Generate new character IDs if none provided
                 documentState.getCharacterIds().clear();
@@ -381,6 +398,12 @@ public class OperationService {
                 }
             }
             documentState.setPreviousContent(op.getContent());
+
+            // Reset any pending operations to avoid conflicts with the new state
+            synchronized (pendingDeletePositions) {
+                pendingDeletePositions.clear();
+                pendingDeleteLengths.clear();
+            }
         } else {
             textArea.setText("");
             documentState.getCharacterIds().clear();

@@ -1,11 +1,16 @@
 package org.example.client;
 
+import javafx.application.Platform;
 import javafx.scene.layout.*;
 import javafx.scene.control.*;
 import javafx.stage.Stage;
 import javafx.geometry.*;
 import javafx.beans.property.StringProperty;
 import javafx.collections.FXCollections;
+import javafx.scene.text.Text;
+import javafx.scene.text.TextFlow;
+import javafx.collections.ObservableList;
+import javafx.collections.ListChangeListener;
 
 public class EditorUI {
     private BorderPane root;
@@ -13,6 +18,7 @@ public class EditorUI {
     private ComboBox<String> documentSelector;
     private Label statusLabel;
     private EditorController controller;
+    private ListView<String> connectedUsersList;
 
     public EditorUI(Stage primaryStage, EditorController controller) {
         this.controller = controller;
@@ -24,12 +30,14 @@ public class EditorUI {
         root.setPadding(new Insets(10));
 
         HBox topBar = createTopBar();
-        textArea = createTextArea();
+        BorderPane textAreaWithLineNumbers = createTextAreaWithLineNumbers();
         HBox statusBar = createStatusBar();
+        VBox usersBar = createUsersBar();
 
         root.setTop(topBar);
-        root.setCenter(textArea);
+        root.setCenter(textAreaWithLineNumbers);
         root.setBottom(statusBar);
+        root.setRight(usersBar);
     }
 
     private HBox createTopBar() {
@@ -59,17 +67,67 @@ public class EditorUI {
         return topBar;
     }
 
-    private TextArea createTextArea() {
-        TextArea area = new TextArea();
-        area.setWrapText(true);
-        area.textProperty().addListener((obs, oldText, newText) -> {
+    private BorderPane createTextAreaWithLineNumbers() {
+        textArea = new TextArea();
+        textArea.setWrapText(true);
+        textArea.textProperty().addListener((obs, oldText, newText) -> {
             if (!controller.getDocumentState().isProcessingRemoteOperation() &&
                     !controller.getUndoRedoService().isUndoRedoOperation()) {
                 controller.handleLocalChange(oldText, newText);
             }
         });
-        controller.setupKeyHandling(area);
-        return area;
+        controller.setupKeyHandling(textArea);
+
+        TextFlow lineNumbers = new TextFlow();
+        lineNumbers.setPrefWidth(40);
+        lineNumbers.setStyle("-fx-background-color: #f4f4f4; -fx-padding: 5px;");
+        lineNumbers.setLineSpacing(0);
+
+        textArea.textProperty().addListener((obs, oldText, newText) -> {
+            updateLineNumbers(lineNumbers);
+        });
+        textArea.scrollTopProperty().addListener((obs, oldValue, newValue) -> {
+            lineNumbers.setTranslateY(- (double)newValue);
+        });
+
+        updateLineNumbers(lineNumbers);
+
+        BorderPane container = new BorderPane();
+        container.setLeft(lineNumbers);
+        container.setCenter(textArea);
+        return container;
+    }
+
+    private void updateLineNumbers(TextFlow lineNumbers) {
+        lineNumbers.getChildren().clear();
+        String text = textArea.getText();
+        int lineCount = text.isEmpty() ? 1 : text.split("\n", -1).length;
+        for (int i = 1; i <= lineCount; i++) {
+            Text lineNumber = new Text(i + "\n");
+            lineNumber.setStyle("-fx-font-family: monospace; -fx-font-size: 14;");
+            lineNumbers.getChildren().add(lineNumber);
+        }
+    }
+
+    private VBox createUsersBar() {
+        VBox usersBar = new VBox(10);
+        usersBar.setPadding(new Insets(5));
+        usersBar.setStyle("-fx-background-color: #f4f4f4; -fx-border-color: #d3d3d3; -fx-border-width: 1px;");
+        usersBar.setPrefWidth(150);
+
+        Label usersLabel = new Label("Connected Users");
+        usersLabel.setStyle("-fx-font-weight: bold;");
+
+        connectedUsersList = new ListView<>();
+        connectedUsersList.setPrefHeight(400);
+        connectedUsersList.setItems(controller.getDocumentState().getConnectedUsers());
+
+        controller.getDocumentState().getConnectedUsers().addListener((ListChangeListener<String>) c -> {
+            Platform.runLater(() -> connectedUsersList.setItems(controller.getDocumentState().getConnectedUsers()));
+        });
+
+        usersBar.getChildren().addAll(usersLabel, connectedUsersList);
+        return usersBar;
     }
 
     private HBox createStatusBar() {

@@ -24,12 +24,10 @@ public class NetworkService {
     public NetworkService(EditorController controller) {
         this.controller = controller;
         this.documentState = controller.getDocumentState();
-        // Explicitly set initial connection status
         Platform.runLater(() -> documentState.getConnectionStatus().set("Connecting..."));
     }
 
     public void connectToWebSocket() {
-        // Update the UI to show connecting state
         Platform.runLater(() -> documentState.getConnectionStatus().set("Connecting..."));
 
         List<Transport> transports = new ArrayList<>();
@@ -86,7 +84,6 @@ public class NetworkService {
     }
 
     public void connectToDocument(String docId) {
-        // Update connection status during reconnection
         Platform.runLater(() -> documentState.getConnectionStatus().set("Reconnecting..."));
 
         if (stompSession != null && stompSession.isConnected()) {
@@ -101,7 +98,6 @@ public class NetworkService {
         if (stompSession == null || !stompSession.isConnected()) {
             Platform.runLater(() -> documentState.getConnectionStatus().set("Not connected - trying to reconnect..."));
             connectToWebSocket();
-            // Queue the operation to be sent after reconnection
             documentState.getOperationQueue().add(operation);
             return;
         }

@@ -7,10 +7,7 @@ import org.json.JSONObject;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ResponseStatusException;
-
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.util.JSONPObject;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -20,46 +17,43 @@ import java.util.Collections;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.Set;
+import java.util.HashSet;
 
 @Service
 public class CollaborationService {
 
     private final Map<String, String> roomIds = new ConcurrentHashMap<>();
-
     private final Map<String, String> usernames = new ConcurrentHashMap<>();
-
-    // Map of documentId -> document content
     private final Map<String, StringBuilder> documentContents = new ConcurrentHashMap<>();
-
-    // Map of clientId -> documentId (to track which document each client is editing)
     private final Map<String, String> clientDocumentMap = new ConcurrentHashMap<>();
-
-    // Keeping track of all operations for possible conflict resolution
     private final Map<String, List<Operation>> documentOperations = new ConcurrentHashMap<>();
-
-    // Map of documentId -> list of character IDs for CRDT
     private final Map<String, List<String>> documentCharacterIds = new ConcurrentHashMap<>();
-
-    // Synchronization objects for each document
     private final Map<String, Object> documentLocks = new ConcurrentHashMap<>();
     private final Map<String, Permission> clientPermissions = new ConcurrentHashMap<>();
+    private final Map<String, Set<String>> documentConnectedUsers = new ConcurrentHashMap<>();
+    private final SimpMessagingTemplate messagingTemplate; // Added for broadcasting
+
     private enum Permission {
         EDIT,
         READ_ONLY
     }
 
-    public JSONObject createNewRoom() throws JSONException {
-    String editRoomId = UUID.randomUUID().toString();
-    String readOnlyRoomId = UUID.randomUUID().toString();
-    roomIds.put(editRoomId, readOnlyRoomId);
-    
-    JSONObject responseJson = new JSONObject();
-    responseJson.put("editRoomId", editRoomId);
-    responseJson.put("readOnlyRoomId", readOnlyRoomId);
-    
-    return responseJson;
-}
+    public CollaborationService(SimpMessagingTemplate messagingTemplate) {
+        this.messagingTemplate = messagingTemplate;
+    }
 
+    public JSONObject createNewRoom() throws JSONException {
+        String editRoomId = UUID.randomUUID().toString();
+        String readOnlyRoomId = UUID.randomUUID().toString();
+        roomIds.put(editRoomId, readOnlyRoomId);
+        documentConnectedUsers.put(editRoomId, ConcurrentHashMap.newKeySet());
+
+        JSONObject responseJson = new JSONObject();
+        responseJson.put("editRoomId", editRoomId);
+        responseJson.put("readOnlyRoomId", readOnlyRoomId);
+
+        return responseJson;
+    }
 
     public JSONObject joinRoom(String roomId) throws JSONException {
         JSONObject responseJson = new JSONObject();
@@ -70,14 +64,11 @@ public class CollaborationService {
             return responseJson;
         }
         if (roomIds.values().contains(roomId)) {
-            //join, but don't edit
             responseJson.put("editRoomId", "You can't edit this");
             responseJson.put("readOnlyRoomId", roomId);
             responseJson.put("canEdit", false);
             return responseJson;
-        }
-        else {
-            //throw exception
+        } else {
             throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Room with ID " + roomId + " not found");
         }
     }
@@ -91,19 +82,17 @@ public class CollaborationService {
 
         String clientId = message.getClientId();
         if (clientId != null) {
-            // Track which document this client is editing
             clientDocumentMap.put(clientId, documentId);
+            documentConnectedUsers.computeIfAbsent(documentId, k -> ConcurrentHashMap.newKeySet()).add(clientId);
+            broadcastUserList(documentId);
         }
 
-        // Get or create document lock
         Object documentLock = documentLocks.computeIfAbsent(documentId, k -> new Object());
 
         synchronized (documentLock) {
-            // Initialize document content if it doesn't exist
             documentContents.putIfAbsent(documentId, new StringBuilder());
             StringBuilder currentContent = documentContents.get(documentId);
 
-            // Initialize character IDs list if it doesn't exist
             documentCharacterIds.putIfAbsent(documentId, new ArrayList<>());
             List<String> charIds = documentCharacterIds.get(documentId);
 
@@ -114,17 +103,16 @@ public class CollaborationService {
                 case OPERATION:
                     Operation operation = message.getOperation();
                     if (operation != null) {
-                        // Track operation for this document
                         documentOperations.computeIfAbsent(documentId, k -> new ArrayList<>());
                         documentOperations.get(documentId).add(operation);
 
-                        // Apply operation to document state
                         applyOperation(documentId, operation);
 
-                        // Return the operation message to broadcast to all clients
                         return message;
                     }
                     break;
+                case USER_LIST:
+                    return message;
             }
         }
 
@@ -138,7 +126,6 @@ public class CollaborationService {
         syncResponse.setDocumentId(documentId);
         syncResponse.setContent(content.toString());
 
-        // Include character IDs in the response
         if (documentCharacterIds.containsKey(documentId)) {
             syncResponse.setCharacterIds(new ArrayList<>(documentCharacterIds.get(documentId)));
         }
@@ -147,6 +134,18 @@ public class CollaborationService {
                 " with content length: " + content.length() +
                 " and " + (documentCharacterIds.getOrDefault(documentId, Collections.emptyList()).size()) + " character IDs");
         return syncResponse;
+    }
+
+    private void broadcastUserList(String documentId) {
+        EditorMessage userListMessage = new EditorMessage();
+        userListMessage.setType(EditorMessage.MessageType.USER_LIST);
+        userListMessage.setClientId("SERVER");
+        userListMessage.setDocumentId(documentId);
+        userListMessage.setConnectedUsers(new ArrayList<>(documentConnectedUsers.getOrDefault(documentId, Collections.emptySet())));
+
+        // Broadcast to all clients subscribed to this document's topic
+        messagingTemplate.convertAndSend("/topic/editor/" + documentId, userListMessage);
+        System.out.println("Broadcasted user list for document " + documentId + ": " + userListMessage.getConnectedUsers());
     }
 
     private void applyOperation(String documentId, Operation operation) {
@@ -161,10 +160,41 @@ public class CollaborationService {
             case DELETE:
                 processDeleteOperation(document, charIds, operation);
                 break;
+
+            case SYNC:
+                processSyncOperation(documentId, document, charIds, operation);
+                break;
         }
 
-        // Validate document state after operation
         validateDocumentState(documentId);
+    }
+    private void processSyncOperation(String documentId, StringBuilder document, List<String> charIds, Operation operation) {
+        try {
+            document.setLength(0);
+            if (operation.getContent() != null) {
+                document.append(operation.getContent());
+            }
+
+            charIds.clear();
+            if (operation.getCharacterIds() != null && !operation.getCharacterIds().isEmpty()) {
+                charIds.addAll(operation.getCharacterIds());
+            } else {
+                // Generate new character IDs if none provided
+                for (int i = 0; i < document.length(); i++) {
+                    charIds.add("sync:" + operation.getTimestamp() + ":" + i);
+                }
+            }
+
+            System.out.println("Applied SYNC operation from client " + operation.getClientId() +
+                    ", document length: " + document.length() +
+                    ", char IDs: " + charIds.size());
+
+            // Clear operations for this document to avoid conflicts with the new state
+            documentOperations.computeIfAbsent(documentId, k -> new ArrayList<>()).clear();
+        } catch (Exception e) {
+            System.err.println("Error processing sync operation: " + e.getMessage());
+            e.printStackTrace();
+        }
     }
 
     private void validateDocumentState(String documentId) {
@@ -175,7 +205,6 @@ public class CollaborationService {
             System.err.println("WARNING: Document state inconsistency detected!");
             System.err.println("Document length: " + document.length() + ", Character IDs count: " + charIds.size());
 
-            // Fix the inconsistency by regenerating character IDs
             charIds.clear();
             for (int i = 0; i < document.length(); i++) {
                 charIds.add("server:recovery:" + System.currentTimeMillis() + ":" + i);
@@ -184,29 +213,25 @@ public class CollaborationService {
             System.out.println("Document state restored with " + charIds.size() + " character IDs");
         }
     }
+
     private void processInsertOperation(StringBuilder document, List<String> charIds, Operation operation) {
         try {
-            // Calculate position from path
             int position = calculatePositionFromPath(document.toString(), charIds, operation.getPath());
             position = Math.max(0, Math.min(position, document.length()));
 
-            // Validate content
             String contentToInsert = operation.getContent();
             if (contentToInsert == null || contentToInsert.isEmpty()) {
                 System.out.println("Empty content for INSERT operation, ignoring");
                 return;
             }
 
-            // Apply insert to document
             document.insert(position, contentToInsert);
 
-            // Generate and insert character IDs
             List<String> newCharIds = new ArrayList<>();
             for (int i = 0; i < contentToInsert.length(); i++) {
                 newCharIds.add(operation.getClientId() + ":" + operation.getTimestamp() + ":" + i);
             }
 
-            // Insert the new character IDs at the correct position
             charIds.addAll(position, newCharIds);
 
             System.out.println("Applied INSERT at position " + position +
@@ -222,7 +247,6 @@ public class CollaborationService {
         try {
             Set<Integer> positionsToDelete = new TreeSet<>(Collections.reverseOrder());
 
-            // Extract character IDs from the path
             for (String pathEntry : operation.getPath()) {
                 if (pathEntry.startsWith("char-")) {
                     String charId = pathEntry.substring(5);
@@ -238,7 +262,9 @@ public class CollaborationService {
                 return;
             }
 
-            // Delete in reverse order to avoid index shifting problems
+            // Check if this is a mass delete operation (more than 50% of document)
+            boolean isMassDelete = positionsToDelete.size() > (document.length() * 0.5);
+
             for (int pos : positionsToDelete) {
                 if (pos >= 0 && pos < document.length()) {
                     document.deleteCharAt(pos);
@@ -250,6 +276,11 @@ public class CollaborationService {
 
             System.out.println("Applied DELETE for " + positionsToDelete.size() +
                     " characters, Document length now: " + document.length());
+
+            // If this was a mass delete, perform extra validation
+            if (isMassDelete) {
+                validateDocumentState(operation.getClientId());
+            }
         } catch (Exception e) {
             System.err.println("Error processing delete operation: " + e.getMessage());
             e.printStackTrace();
@@ -258,10 +289,10 @@ public class CollaborationService {
 
     private int calculatePositionFromPath(String document, List<String> charIds, List<String> path) {
         if (path == null || path.isEmpty()) return 0;
-    
+
         if (path.contains("start")) return 0;
         if (path.contains("end")) return document.length();
-    
+
         for (String pathEntry : path) {
             if (pathEntry.startsWith("after-")) {
                 String charId = pathEntry.substring(6);
@@ -271,7 +302,7 @@ public class CollaborationService {
                 }
             }
         }
-    
+
         for (String pathEntry : path) {
             if (pathEntry.startsWith("char-")) {
                 String charId = pathEntry.substring(5);
@@ -281,15 +312,20 @@ public class CollaborationService {
                 }
             }
         }
-    
-        // Fallback to end of document if path can't be resolved
+
         System.out.println("WARNING: Could not resolve path " + path + ", defaulting to end of document");
         return document.length();
     }
 
     public void handleClientDisconnect(String clientId) {
-        // Remove from client-document mapping
-        clientDocumentMap.remove(clientId);
+        String documentId = clientDocumentMap.remove(clientId);
+        if (documentId != null) {
+            Set<String> connectedUsers = documentConnectedUsers.get(documentId);
+            if (connectedUsers != null) {
+                connectedUsers.remove(clientId);
+                broadcastUserList(documentId);
+            }
+        }
         System.out.println("Client disconnected: " + clientId);
     }
 }
