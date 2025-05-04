@@ -23,6 +23,11 @@ import java.util.*;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.swing.undo.UndoManager;
+import javax.swing.undo.CannotUndoException;
+import javax.swing.undo.CannotRedoException;
+
+
 public class EditorClient {
     private JFrame frame;
     private JTextArea textArea;
@@ -34,7 +39,9 @@ public class EditorClient {
     private String previousContent = "";
     // Store character IDs for CRDT (e.g., ["client1:1234567890", "client1:1234567891", ...])
     private List<String> characterIds = new ArrayList<>();
-
+    private UndoManager undoManager = new UndoManager();
+    private List<String> redoStack = new ArrayList<>();
+    private List<String> undoStack = new ArrayList<>(); // Store undo/redo operations
     public EditorClient() {
         initializeClientInfo();
         initializeUI();
@@ -93,11 +100,13 @@ public class EditorClient {
         frame = new JFrame("Collaborative Editor - Doc: " + documentId + " - Client: " + clientId.substring(0, 8));
         frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         frame.setSize(800, 600);
-
+        JButton undoButton = new JButton("Undo");
+        JButton redoButton = new JButton("Redo");
         textArea = new JTextArea();
         textArea.setFont(new Font("Monospaced", Font.PLAIN, 14));
         textArea.setLineWrap(true);
         textArea.setWrapStyleWord(true);
+        textArea.getDocument().addUndoableEditListener(e -> undoManager.addEdit(e.getEdit()));
 
         textArea.getDocument().addDocumentListener(new DocumentListener() {
             @Override
@@ -128,7 +137,30 @@ public class EditorClient {
                 // Not used for plain text
             }
         });
-
+        undoButton.addActionListener(e -> {
+            try {
+                if (undoManager.canUndo()) {
+                    undoManager.undo();
+                }
+            } catch (CannotUndoException ex) {
+                ex.printStackTrace();
+            }
+        });
+        
+        redoButton.addActionListener(e -> {
+            try {
+                if (undoManager.canRedo()) {
+                    undoManager.redo();
+                }
+            } catch (CannotRedoException ex) {
+                ex.printStackTrace();
+            }
+        });
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        buttonPanel.add(undoButton);
+        buttonPanel.add(redoButton);
+        
+        frame.add(buttonPanel, BorderLayout.NORTH);
         JScrollPane scrollPane = new JScrollPane(textArea);
         JPanel statusPanel = new JPanel(new BorderLayout());
         JLabel statusLabel = new JLabel(" Connected as: " + clientId.substring(0, 8) + " | Document: " + documentId);
@@ -272,6 +304,7 @@ public class EditorClient {
                                 ", Path: " + transformedOp.getPath() +
                                 ", Position: " + pos +
                                 ", Document: " + textArea.getText());
+                                undoManager.discardAllEdits();  // Reset undo stack on remote sync to avoid desync issues
 
                         if (transformedOp.getType() == Operation.Type.INSERT) {
                             // Generate character IDs for inserted text
@@ -319,6 +352,7 @@ public class EditorClient {
                 }
             }
         });
+        
     }
 
     private List<String> calculatePathForPosition(int position) {
