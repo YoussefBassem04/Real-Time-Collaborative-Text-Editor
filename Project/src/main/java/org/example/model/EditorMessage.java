@@ -5,16 +5,18 @@ import org.example.crdt.Operation;
 import java.util.List;
 
 public class EditorMessage {
+    public enum MessageType {
+        SYNC_REQUEST,
+        SYNC_RESPONSE,
+        OPERATION
+    }
+
     private MessageType type;
     private String clientId;
     private String documentId;
-    private Operation operation;
     private String content;
-    private List<String> characterIds; // Add this field
-
-    public enum MessageType {
-        OPERATION, SYNC_REQUEST, SYNC_RESPONSE
-    }
+    private Operation operation;
+    private List<String> characterIds;  // Added field for character IDs
 
     // Getters and setters
     public MessageType getType() {
@@ -41,20 +43,20 @@ public class EditorMessage {
         this.documentId = documentId;
     }
 
-    public Operation getOperation() {
-        return operation;
-    }
-
-    public void setOperation(Operation operation) {
-        this.operation = operation;
-    }
-
     public String getContent() {
         return content;
     }
 
     public void setContent(String content) {
         this.content = content;
+    }
+
+    public Operation getOperation() {
+        return operation;
+    }
+
+    public void setOperation(Operation operation) {
+        this.operation = operation;
     }
 
     public List<String> getCharacterIds() {
@@ -71,9 +73,9 @@ public class EditorMessage {
                 "type=" + type +
                 ", clientId='" + clientId + '\'' +
                 ", documentId='" + documentId + '\'' +
+                ", content='" + (content != null ? (content.length() > 20 ? content.substring(0, 20) + "..." : content) : null) + '\'' +
                 ", operation=" + operation +
-                ", content='" + content + '\'' +
-                ", characterIds=" + characterIds +
+                ", characterIds=" + (characterIds != null ? characterIds.size() : 0) + " ids" +
                 '}';
     }
 }
