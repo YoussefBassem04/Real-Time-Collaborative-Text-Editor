@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+<<<<<<< Updated upstream
   <component name="ChangeListManager">
     <list default="true" id="c50022dd-9374-4534-bb1d-fba187fd8640" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/Real-Time Collaborative Text Editor.iml" beforeDir="false" />
@@ -8,6 +9,13 @@
       <change beforePath="$PROJECT_DIR$/.idea/vcs.xml" beforeDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" />
     </list>
+=======
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="06780787-1806-478a-bc4f-bc55f3d50ca8" name="Changes" comment="" />
+>>>>>>> Stashed changes
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
@@ -17,30 +25,51 @@
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
   <component name="ProjectColorInfo"><![CDATA[{
+<<<<<<< Updated upstream
   "customColor": "",
   "associatedIndex": 0
 }]]></component>
   <component name="ProjectId" id="2uuMORaK9IuXFDC3auDfR4WmAZz" />
+=======
+  "associatedIndex": 8
+}]]></component>
+  <component name="ProjectId" id="2wXQF3RqVqUMPHc1KGOVlnqaKJF" />
+>>>>>>> Stashed changes
   <component name="ProjectViewState">
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
   <component name="PropertiesComponent"><![CDATA[{
   "keyToString": {
+<<<<<<< Updated upstream
     "RunOnceActivity.ShowReadmeOnStart": "true",
     "RunOnceActivity.git.unshallow": "true",
     "git-widget-placeholder": "master",
+=======
+    "Application.CollaborativeEditorApplication.executor": "Run",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "offf",
+>>>>>>> Stashed changes
     "kotlin-language-version-configured": "true"
   }
 }]]></component>
   <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
   <component name="TaskManager">
     <task active="true" id="Default" summary="Default task">
+<<<<<<< Updated upstream
       <changelist id="c50022dd-9374-4534-bb1d-fba187fd8640" name="Changes" comment="" />
       <created>1743093973680</created>
       <option name="number" value="Default" />
       <option name="presentableId" value="Default" />
       <updated>1743093973680</updated>
+=======
+      <changelist id="06780787-1806-478a-bc4f-bc55f3d50ca8" name="Changes" comment="" />
+      <created>1746185333755</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1746185333755</updated>
+>>>>>>> Stashed changes
     </task>
     <servers />
   </component>
