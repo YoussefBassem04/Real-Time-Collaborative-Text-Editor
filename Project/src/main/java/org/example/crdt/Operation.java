@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.ArrayList;
 
 public class Operation {
+
     public enum Type {
         INSERT,
         DELETE,
@@ -16,6 +17,26 @@ public class Operation {
     private long timestamp;
     private String clientId;
     private List<String> characterIds; // Add this field for sync operations
+
+    public String getReferenceCharId() {
+        return referenceCharId;
+    }
+    public Operation(Type type, String content, List<String> newPath, long l, String clientId, String referenceCharId, int position) {
+        this.type = type;
+        this.content = content;
+        this.path = newPath;
+        this.timestamp = l;
+        this.clientId = clientId;
+        this.characterIds = new ArrayList<>();
+        this.referenceCharId = referenceCharId; // Set the reference character ID
+        this.position = position; // Set the position
+    }
+    public int getPosition() {
+        return position;
+    }
+
+    private String referenceCharId; // New field: ID of the character before this operation's position
+    private int position;
 
     public Operation() {
         // Default constructor for Jackson deserialization

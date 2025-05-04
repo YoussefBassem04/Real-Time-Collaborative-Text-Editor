@@ -38,28 +38,89 @@ public class CollaborationService {
 
     // Synchronization objects for each document
     private final Map<String, Object> documentLocks = new ConcurrentHashMap<>();
+    private final Map<String, Permission> clientPermissions = new ConcurrentHashMap<>();
+    private enum Permission {
+        EDIT,
+        READ_ONLY
+    }
 
     public JSONPObject createNewRoom() {
         String editRoomId = UUID.randomUUID().toString();
         String readOnlyRoomId = UUID.randomUUID().toString();
+
         roomIds.put(editRoomId, readOnlyRoomId);
+
+        documentContents.putIfAbsent(editRoomId, new StringBuilder());
+        documentCharacterIds.putIfAbsent(editRoomId, new ArrayList<>());
+        documentOperations.putIfAbsent(editRoomId, new ArrayList<>());
+        documentLocks.putIfAbsent(editRoomId, new Object());
+
         ObjectMapper mapper = new ObjectMapper();
         try {
-            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(editRoomId);
+            Map<String, String> response = new ConcurrentHashMap<>();
+            response.put("editRoomId", editRoomId);
+            response.put("readOnlyRoomId", readOnlyRoomId);
+
+            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
+            return new JSONPObject("callback", json);
         } catch (JsonProcessingException e) {
+            System.err.println("Error creating room: " + e.getMessage());
             e.printStackTrace();
+            return new JSONPObject("callback", "{\"error\": \"Failed to create room\"}");
         }
     }
 
     public JSONPObject joinRoom(String roomId) {
-        if (roomIds.containsKey(roomId)) {
-            //true, can edit
-        }
-        if (roomIds.values().contains(roomId)) {
-            //join, but don't edit
-        }
-        else {
-            //throw exception
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            Map<String, Object> response = new ConcurrentHashMap<>();
+            String clientId = UUID.randomUUID().toString();
+            String editRoomId = null;
+
+            if (roomIds.containsKey(roomId)) {
+                editRoomId = roomId;
+                clientPermissions.put(clientId, Permission.EDIT);
+                clientDocumentMap.put(clientId, editRoomId);
+
+                response.put("clientId", clientId);
+                response.put("editRoomId", editRoomId);
+                response.put("permission", "EDIT");
+                response.put("status", "success");
+
+                String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
+                return new JSONPObject("callback", json);
+            }
+            else if (roomIds.containsValue(roomId)) {
+                for (Map.Entry<String, String> entry : roomIds.entrySet()) {
+                    if (entry.getValue().equals(roomId)) {
+                        editRoomId = entry.getKey();
+                        break;
+                    }
+                }
+
+                if (editRoomId != null) {
+                    clientPermissions.put(clientId, Permission.READ_ONLY);
+                    clientDocumentMap.put(clientId, editRoomId);
+
+                    response.put("clientId", clientId);
+                    response.put("editRoomId", editRoomId);
+                    response.put("permission", "READ_ONLY");
+                    response.put("status", "success");
+
+                    String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
+                    return new JSONPObject("callback", json);
+                }
+            }
+
+            response.put("status", "error");
+            response.put("message", "Invalid room ID");
+            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
+            return new JSONPObject("callback", json);
+
+        } catch (JsonProcessingException e) {
+            System.err.println("Error joining room: " + e.getMessage());
+            e.printStackTrace();
+            return new JSONPObject("callback", "{\"status\": \"error\", \"message\": \"Failed to join room\"}");
         }
     }
 
