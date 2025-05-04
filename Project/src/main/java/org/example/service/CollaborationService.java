@@ -2,7 +2,11 @@ package org.example.service;
 
 import org.example.crdt.Operation;
 import org.example.model.EditorMessage;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -44,83 +48,37 @@ public class CollaborationService {
         READ_ONLY
     }
 
-    public JSONPObject createNewRoom() {
-        String editRoomId = UUID.randomUUID().toString();
-        String readOnlyRoomId = UUID.randomUUID().toString();
+    public JSONObject createNewRoom() throws JSONException {
+    String editRoomId = UUID.randomUUID().toString();
+    String readOnlyRoomId = UUID.randomUUID().toString();
+    roomIds.put(editRoomId, readOnlyRoomId);
+    
+    JSONObject responseJson = new JSONObject();
+    responseJson.put("editRoomId", editRoomId);
+    responseJson.put("readOnlyRoomId", readOnlyRoomId);
+    
+    return responseJson;
+}
 
-        roomIds.put(editRoomId, readOnlyRoomId);
 
-        documentContents.putIfAbsent(editRoomId, new StringBuilder());
-        documentCharacterIds.putIfAbsent(editRoomId, new ArrayList<>());
-        documentOperations.putIfAbsent(editRoomId, new ArrayList<>());
-        documentLocks.putIfAbsent(editRoomId, new Object());
-
-        ObjectMapper mapper = new ObjectMapper();
-        try {
-            Map<String, String> response = new ConcurrentHashMap<>();
-            response.put("editRoomId", editRoomId);
-            response.put("readOnlyRoomId", readOnlyRoomId);
-
-            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
-            return new JSONPObject("callback", json);
-        } catch (JsonProcessingException e) {
-            System.err.println("Error creating room: " + e.getMessage());
-            e.printStackTrace();
-            return new JSONPObject("callback", "{\"error\": \"Failed to create room\"}");
+    public JSONObject joinRoom(String roomId) throws JSONException {
+        JSONObject responseJson = new JSONObject();
+        if (roomIds.containsKey(roomId)) {
+            responseJson.put("editRoomId", roomId);
+            responseJson.put("readOnlyRoomId", roomIds.get(roomId));
+            responseJson.put("canEdit", true);
+            return responseJson;
         }
-    }
-
-    public JSONPObject joinRoom(String roomId) {
-        ObjectMapper mapper = new ObjectMapper();
-        try {
-            Map<String, Object> response = new ConcurrentHashMap<>();
-            String clientId = UUID.randomUUID().toString();
-            String editRoomId = null;
-
-            if (roomIds.containsKey(roomId)) {
-                editRoomId = roomId;
-                clientPermissions.put(clientId, Permission.EDIT);
-                clientDocumentMap.put(clientId, editRoomId);
-
-                response.put("clientId", clientId);
-                response.put("editRoomId", editRoomId);
-                response.put("permission", "EDIT");
-                response.put("status", "success");
-
-                String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
-                return new JSONPObject("callback", json);
-            }
-            else if (roomIds.containsValue(roomId)) {
-                for (Map.Entry<String, String> entry : roomIds.entrySet()) {
-                    if (entry.getValue().equals(roomId)) {
-                        editRoomId = entry.getKey();
-                        break;
-                    }
-                }
-
-                if (editRoomId != null) {
-                    clientPermissions.put(clientId, Permission.READ_ONLY);
-                    clientDocumentMap.put(clientId, editRoomId);
-
-                    response.put("clientId", clientId);
-                    response.put("editRoomId", editRoomId);
-                    response.put("permission", "READ_ONLY");
-                    response.put("status", "success");
-
-                    String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
-                    return new JSONPObject("callback", json);
-                }
-            }
-
-            response.put("status", "error");
-            response.put("message", "Invalid room ID");
-            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(response);
-            return new JSONPObject("callback", json);
-
-        } catch (JsonProcessingException e) {
-            System.err.println("Error joining room: " + e.getMessage());
-            e.printStackTrace();
-            return new JSONPObject("callback", "{\"status\": \"error\", \"message\": \"Failed to join room\"}");
+        if (roomIds.values().contains(roomId)) {
+            //join, but don't edit
+            responseJson.put("editRoomId", "You can't edit this");
+            responseJson.put("readOnlyRoomId", roomId);
+            responseJson.put("canEdit", false);
+            return responseJson;
+        }
+        else {
+            //throw exception
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Room with ID " + roomId + " not found");
         }
     }
 

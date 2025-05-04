@@ -17,6 +17,7 @@ module org.example.collaborativeeditor {
     requires com.fasterxml.jackson.databind;
     requires com.fasterxml.jackson.core;
     requires java.desktop;
+    requires json;
 
     // Open packages for Spring reflection
     opens org.example to spring.core, spring.beans, spring.context, spring.web;
