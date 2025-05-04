@@ -8,8 +8,7 @@ public class EditorMessage {
     public enum MessageType {
         SYNC_REQUEST,
         SYNC_RESPONSE,
-        OPERATION,
-        CURSOR
+        OPERATION
     }
 
     private MessageType type;
@@ -17,8 +16,7 @@ public class EditorMessage {
     private String documentId;
     private String content;
     private Operation operation;
-    private List<String> characterIds;  // Added typed list for character IDs
-    private int cursorPosition = -1;    // Added for cursor position tracking
+    private List<String> characterIds;  // Added field for character IDs
 
     // Getters and setters
     public MessageType getType() {
@@ -69,14 +67,6 @@ public class EditorMessage {
         this.characterIds = characterIds;
     }
 
-    public int getCursorPosition() {
-        return cursorPosition;
-    }
-
-    public void setCursorPosition(int cursorPosition) {
-        this.cursorPosition = cursorPosition;
-    }
-
     @Override
     public String toString() {
         return "EditorMessage{" +
@@ -86,7 +76,6 @@ public class EditorMessage {
                 ", content='" + (content != null ? (content.length() > 20 ? content.substring(0, 20) + "..." : content) : null) + '\'' +
                 ", operation=" + operation +
                 ", characterIds=" + (characterIds != null ? characterIds.size() : 0) + " ids" +
-                ", cursorPosition=" + cursorPosition +
                 '}';
     }
 }
