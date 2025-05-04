@@ -4,16 +4,25 @@ import org.example.crdt.Operation;
 import org.example.model.EditorMessage;
 import org.springframework.stereotype.Service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.util.JSONPObject;
+
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Collections;
 import java.util.TreeSet;
+import java.util.UUID;
 import java.util.Set;
 
 @Service
 public class CollaborationService {
+
+    private final Map<String, String> roomIds = new ConcurrentHashMap<>();
+
+    private final Map<String, String> usernames = new ConcurrentHashMap<>();
 
     // Map of documentId -> document content
     private final Map<String, StringBuilder> documentContents = new ConcurrentHashMap<>();
@@ -29,6 +38,30 @@ public class CollaborationService {
 
     // Synchronization objects for each document
     private final Map<String, Object> documentLocks = new ConcurrentHashMap<>();
+
+    public JSONPObject createNewRoom() {
+        String editRoomId = UUID.randomUUID().toString();
+        String readOnlyRoomId = UUID.randomUUID().toString();
+        roomIds.put(editRoomId, readOnlyRoomId);
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(editRoomId);
+        } catch (JsonProcessingException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public JSONPObject joinRoom(String roomId) {
+        if (roomIds.containsKey(roomId)) {
+            //true, can edit
+        }
+        if (roomIds.values().contains(roomId)) {
+            //join, but don't edit
+        }
+        else {
+            //throw exception
+        }
+    }
 
     public EditorMessage processMessage(EditorMessage message) {
         String documentId = message.getDocumentId();
