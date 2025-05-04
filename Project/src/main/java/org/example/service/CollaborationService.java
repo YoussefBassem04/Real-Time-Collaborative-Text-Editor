@@ -2,7 +2,11 @@ package org.example.service;
 
 import org.example.crdt.Operation;
 import org.example.model.EditorMessage;
+import org.json.JSONException;
+import org.json.JSONObject;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -39,27 +43,37 @@ public class CollaborationService {
     // Synchronization objects for each document
     private final Map<String, Object> documentLocks = new ConcurrentHashMap<>();
 
-    public JSONPObject createNewRoom() {
-        String editRoomId = UUID.randomUUID().toString();
-        String readOnlyRoomId = UUID.randomUUID().toString();
-        roomIds.put(editRoomId, readOnlyRoomId);
-        ObjectMapper mapper = new ObjectMapper();
-        try {
-            String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(editRoomId);
-        } catch (JsonProcessingException e) {
-            e.printStackTrace();
-        }
-    }
+    public JSONObject createNewRoom() throws JSONException {
+    String editRoomId = UUID.randomUUID().toString();
+    String readOnlyRoomId = UUID.randomUUID().toString();
+    roomIds.put(editRoomId, readOnlyRoomId);
+    
+    JSONObject responseJson = new JSONObject();
+    responseJson.put("editRoomId", editRoomId);
+    responseJson.put("readOnlyRoomId", readOnlyRoomId);
+    
+    return responseJson;
+}
 
-    public JSONPObject joinRoom(String roomId) {
+
+    public JSONObject joinRoom(String roomId) throws JSONException {
+        JSONObject responseJson = new JSONObject();
         if (roomIds.containsKey(roomId)) {
-            //true, can edit
+            responseJson.put("editRoomId", roomId);
+            responseJson.put("readOnlyRoomId", roomIds.get(roomId));
+            responseJson.put("canEdit", true);
+            return responseJson;
         }
         if (roomIds.values().contains(roomId)) {
             //join, but don't edit
+            responseJson.put("editRoomId", "You can't edit this");
+            responseJson.put("readOnlyRoomId", roomId);
+            responseJson.put("canEdit", false);
+            return responseJson;
         }
         else {
             //throw exception
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "Room with ID " + roomId + " not found");
         }
     }
 
