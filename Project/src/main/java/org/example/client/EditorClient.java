@@ -43,8 +43,10 @@ public class EditorClient extends Application {
 
     // Undo/Redo stacks
     private Deque<UndoRedoState> undoStack = new LinkedList<>();
-    private Deque<UndoRedoState> redoStack = new LinkedList<>();
-    private boolean isUndoRedoOperation = false;
+private Deque<UndoRedoState> redoStack = new LinkedList<>();
+private boolean isUndoRedoOperation = false;
+private static final int MAX_UNDO_HISTORY = 100;
+private boolean isApplyingState = false;
 
     // Store character IDs for CRDT
     private List<String> characterIds = new ArrayList<>();
@@ -67,8 +69,6 @@ public class EditorClient extends Application {
     // Constants
     private static final int OPERATION_FLUSH_DELAY = 100; // ms
     private static final int BATCH_DELAY = 50; // ms
-    private static final int MAX_UNDO_HISTORY = 100;
-
     // Previously visited documents
     private Set<String> recentDocuments = new HashSet<>();
 
@@ -122,6 +122,9 @@ public class EditorClient extends Application {
             }
         });
 
+        // Set up specific key handling for backspace
+        setupKeyHandling();
+
         // Bottom - Status bar
         HBox statusBar = new HBox(10);
         statusBar.setAlignment(Pos.CENTER_LEFT);
@@ -151,24 +154,6 @@ public class EditorClient extends Application {
                 new Separator(javafx.geometry.Orientation.VERTICAL),
                 undoButton, redoButton);
 
-        // Set up keyboard shortcuts for undo/redo
-        textArea.setOnKeyPressed(event -> {
-            if (event.isControlDown()) {
-                switch (event.getCode()) {
-                    case Z:
-                        performUndo();
-                        event.consume();
-                        break;
-                    case Y:
-                        performRedo();
-                        event.consume();
-                        break;
-                    default:
-                        break;
-                }
-            }
-        });
-
         // Assemble root layout
         root.setTop(topBar);
         root.setCenter(textArea);
@@ -194,9 +179,9 @@ public class EditorClient extends Application {
         operationFlushTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
         operationFlushTimer.play();
 
-        // Timer for batching local edits
+        // Timer for batching local edits - make it more dynamic for backspace
         batchTimer = new javafx.animation.Timeline(
-                new javafx.animation.KeyFrame(Duration.millis(BATCH_DELAY),
+                new javafx.animation.KeyFrame(Duration.millis(BATCH_DELAY * 2), // Longer batch delay for backspace
                         e -> processPendingEdits())
         );
         batchTimer.setCycleCount(1);
@@ -294,7 +279,10 @@ public class EditorClient extends Application {
     }
 
     private void handleLocalChange(String oldText, String newText) {
-        if (oldText == null || newText == null) return;
+        if (oldText == null || newText == null || isUndoRedoOperation) return;
+
+        // Save state for undo before applying changes
+        saveStateForUndo();
 
         // Find the differences between old and new text
         int[] diffInfo = calculateTextDifference(oldText, newText);
@@ -302,13 +290,37 @@ public class EditorClient extends Application {
         int deletedLength = diffInfo[1];
         int insertedLength = diffInfo[2];
 
-        // Handle deletes first if needed
+        // For rapid backspace operations, optimize by capturing larger batches
         if (deletedLength > 0) {
             synchronized (pendingDeletePositions) {
-                pendingDeletePositions.add(position);
-                pendingDeleteLengths.add(deletedLength);
+                // If we have a pending operation at this position or adjacent, merge them
+                boolean merged = false;
+                for (int i = 0; i < pendingDeletePositions.size(); i++) {
+                    int existingPos = pendingDeletePositions.get(i);
+                    // Check if positions are adjacent (current delete starts where previous ends)
+                    if (existingPos == position + deletedLength) {
+                        // Update existing position to cover both deletions
+                        pendingDeletePositions.set(i, position);
+                        pendingDeleteLengths.set(i, pendingDeleteLengths.get(i) + deletedLength);
+                        merged = true;
+                        break;
+                    }
+                    // Check if new delete happens right after existing one
+                    else if (position == existingPos + pendingDeleteLengths.get(i)) {
+                        // Extend existing deletion
+                        pendingDeleteLengths.set(i, pendingDeleteLengths.get(i) + deletedLength);
+                        merged = true;
+                        break;
+                    }
+                }
 
-                // Reset timer for batch processing
+                // If not merged with existing operations, add as new
+                if (!merged) {
+                    pendingDeletePositions.add(position);
+                    pendingDeleteLengths.add(deletedLength);
+                }
+
+                // Reset timer for batch processing - extend delay for backspace key
                 if (batchTimer.getStatus() == javafx.animation.Animation.Status.RUNNING) {
                     batchTimer.stop();
                 }
@@ -321,9 +333,6 @@ public class EditorClient extends Application {
             String insertedText = newText.substring(position, position + insertedLength);
             handleLocalInsert(insertedText, position);
         }
-
-        // Save state for undo
-        saveStateForUndo(oldText);
     }
 
     private int[] calculateTextDifference(String oldText, String newText) {
@@ -355,82 +364,566 @@ public class EditorClient extends Application {
         return new int[] { commonPrefixLength, deletedLength, insertedLength };
     }
 
-    private void saveStateForUndo(String previousState) {
-        // Don't save state during undo/redo operations
-        if (isUndoRedoOperation) return;
-
+    private void saveStateForUndo() {
+        // Don't save states while applying undo/redo
+        if (isUndoRedoOperation || isApplyingState) return;
+        
         // Save current state to undo stack
-        undoStack.push(new UndoRedoState(previousState, new ArrayList<>(characterIds)));
-
+        UndoRedoState state = new UndoRedoState(
+            textArea.getText(), 
+            new ArrayList<>(characterIds),
+            textArea.getCaretPosition()
+        );
+        undoStack.push(state);
+    
         // Clear redo stack when new edits are made
         redoStack.clear();
-
+    
         // Limit undo stack size
         if (undoStack.size() > MAX_UNDO_HISTORY) {
             undoStack.removeLast();
         }
+        
+        System.out.println("Saved state to undo stack. Stack size: " + undoStack.size());
+    }
+    /**
+ * Calculate the required operations to transform sourceText into targetText
+ * @param sourceText The source text
+ * @param targetText The target text
+ * @return A list of operations that transform source into target
+ */
+private List<org.example.crdt.Operation> calculateDiffOperations(String sourceText, String targetText) {
+    List<org.example.crdt.Operation> operations = new ArrayList<>();
+    
+    // Find common prefix and suffix first
+    int[] diffInfo = calculateTextDifference(sourceText, targetText);
+    int prefixLength = diffInfo[0];
+    int sourceDeleteLength = diffInfo[1];
+    int targetInsertLength = diffInfo[2];
+    
+    // If there are characters to delete
+    if (sourceDeleteLength > 0) {
+        List<String> deletePaths = new ArrayList<>();
+        for (int i = prefixLength; i < prefixLength + sourceDeleteLength; i++) {
+            if (i < characterIds.size()) {
+                deletePaths.add("char-" + characterIds.get(i));
+            }
+        }
+        
+        if (!deletePaths.isEmpty()) {
+            org.example.crdt.Operation deleteOp = new org.example.crdt.Operation(
+                org.example.crdt.Operation.Type.DELETE,
+                sourceText.substring(prefixLength, prefixLength + sourceDeleteLength),
+                deletePaths,
+                System.currentTimeMillis(),
+                clientId
+            );
+            operations.add(deleteOp);
+        }
+    }
+    
+    // If there are characters to insert
+    if (targetInsertLength > 0) {
+        List<String> insertPath = new ArrayList<>();
+        if (prefixLength == 0) {
+            insertPath.add("start");
+        } else if (prefixLength >= characterIds.size()) {
+            insertPath.add("end");
+        } else {
+            insertPath.add("after-" + characterIds.get(prefixLength - 1));
+        }
+        
+        org.example.crdt.Operation insertOp = new org.example.crdt.Operation(
+            org.example.crdt.Operation.Type.INSERT,
+            targetText.substring(prefixLength, prefixLength + targetInsertLength),
+            insertPath,
+            System.currentTimeMillis(),
+            clientId
+        );
+        operations.add(insertOp);
+    }
+    
+    return operations;
+}
+    private void setupKeyHandling() {
+        // Track if backspace is being held down
+        final AtomicBoolean isBackspaceHeld = new AtomicBoolean(false);
+
+        textArea.setOnKeyPressed(event -> {
+            if (event.isControlDown()) {
+                switch (event.getCode()) {
+                    case Z:
+                        performUndo();
+                        event.consume();
+                        break;
+                    case Y:
+                        performRedo();
+                        event.consume();
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            // Track backspace key state
+            if (event.getCode() == javafx.scene.input.KeyCode.BACK_SPACE) {
+                isBackspaceHeld.set(true);
+                // For held backspace, we should flush operations more frequently
+                if (operationFlushTimer != null) {
+                    operationFlushTimer.stop();
+                    operationFlushTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
+                    operationFlushTimer.setRate(2.0); // Faster flush rate during backspace
+                    operationFlushTimer.play();
+                }
+            }
+        });
+
+        textArea.setOnKeyReleased(event -> {
+            if (event.getCode() == javafx.scene.input.KeyCode.BACK_SPACE) {
+                isBackspaceHeld.set(false);
+                // Return to normal operation flush rate
+                if (operationFlushTimer != null) {
+                    operationFlushTimer.stop();
+                    operationFlushTimer.setCycleCount(javafx.animation.Animation.INDEFINITE);
+                    operationFlushTimer.setRate(1.0);
+                    operationFlushTimer.play();
+                }
+
+                // Force process any pending edits immediately when backspace is released
+                processPendingEdits();
+            }
+        });
     }
 
-    private void performUndo() {
-        if (undoStack.isEmpty()) return;
+/**
+ * Sends an operation to the server
+ * @param operation The operation to send
+ */
+private void sendOperation(Operation op) {
+    if (stompSession == null || !stompSession.isConnected()) {
+        System.err.println("Cannot send operation: not connected");
+        return;
+    }
+
+    try {
+        EditorMessage message = new EditorMessage();
+        message.setType(EditorMessage.MessageType.OPERATION);
+        message.setClientId(clientId);
+        message.setDocumentId(documentId);
+        message.setOperation(op);
+
+        stompSession.send("/app/editor/operation", message);
+        System.out.println("⇨ Sent " + op.getType() + " operation to server");
+    } catch (Exception e) {
+        System.err.println("Error sending operation: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+/**
+ * Generate unique character IDs for newly inserted content
+ * @param count Number of characters to generate IDs for
+ * @return List of unique character IDs
+ */
+private List<String> generateCharIds(int count) {
+    List<String> charIds = new ArrayList<>();
+    long timestamp = System.currentTimeMillis();
+    for (int i = 0; i < count; i++) {
+        charIds.add(clientId + ":" + timestamp + ":" + i);
+    }
+    return charIds;
+}
+    /**
+ * Applies an undo/redo state by calculating and applying the differences
+ * @param state The target state to apply
+ */
+private void applyUndoRedoState(UndoRedoState state) {
+    synchronized (documentLock) {
+        String currentText = textArea.getText();
+        String targetText = state.text;
+
+        // Use a diff algorithm to find the minimum operations needed
+        List<org.example.crdt.Operation> operations = calculateDiffOperations(currentText, targetText);
+        
+        // Apply operations to reach the target state
+        for (org.example.crdt.Operation op : operations) {
+            // Send operations to server
+            sendOperation(op);
+            
+            // Apply operations locally
+            if (op.getType() == org.example.crdt.Operation.Type.INSERT) {
+                // Apply insert locally
+                String path = op.getPath().get(0);
+                int position;
+                if (path.equals("start")) {
+                    position = 0;
+                } else if (path.equals("end")) {
+                    position = currentText.length();
+                } else {
+                    // Handle "after-X" path
+                    String charId = path.substring(6);
+                    position = characterIds.indexOf(charId) + 1;
+                }
+                
+                // Update the text
+                currentText = currentText.substring(0, position) + 
+                              op.getContent() + 
+                              currentText.substring(position);
+                
+                // Update characterIds
+                List<String> newCharIds = generateCharIds(op.getContent().length());
+                characterIds.addAll(position, newCharIds);
+                
+            } else if (op.getType() == org.example.crdt.Operation.Type.DELETE) {
+                // Apply delete locally
+                for (String path : op.getPath()) {
+                    if (path.startsWith("char-")) {
+                        String charId = path.substring(5);
+                        int index = characterIds.indexOf(charId);
+                        if (index != -1 && index < currentText.length()) {
+                            // Remove from character IDs
+                            characterIds.remove(index);
+                            
+                            // Remove from text
+                            currentText = currentText.substring(0, index) + 
+                                         currentText.substring(index + 1);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Update the UI
+        textArea.setText(targetText);
+        
+        // Restore character IDs if they don't match
+        if (characterIds.size() != targetText.length()) {
+            System.out.println("⚠️ Character IDs mismatch after undo/redo, restoring from saved state");
+            characterIds.clear();
+            characterIds.addAll(state.characterIds);
+        }
+        
+        // Set caret position if specified
+        if (state.caretPosition >= 0 && state.caretPosition <= textArea.getLength()) {
+            textArea.positionCaret(state.caretPosition);
+        }
+        
+        // Update state
+        previousContent = targetText;
+    }
+}
+    private void executeAndSendDelete(int position, int length) {
+        if (position < 0 || length <= 0 || position + length > characterIds.size()) {
+            System.err.println("Invalid delete parameters: pos=" + position + ", len=" + length);
+            return;
+        }
+
+        // Get IDs of characters to delete
+        List<String> idsToDelete = new ArrayList<>();
+        for (int i = position; i < position + length; i++) {
+            if (i < characterIds.size()) {
+                idsToDelete.add(characterIds.get(i));
+            }
+        }
+
+        if (idsToDelete.isEmpty()) {
+            System.err.println("No valid IDs to delete");
+            return;
+        }
+
+        // Create paths for the delete operation
+        List<String> paths = new ArrayList<>();
+        for (String id : idsToDelete) {
+            paths.add("char-" + id);
+        }
+
+        // Create and send the operation
+        Operation deleteOp = new Operation(
+                Operation.Type.DELETE,
+                textArea.getText().substring(position, position + length),
+                paths,
+                System.currentTimeMillis(),
+                clientId
+        );
+
+        // Execute locally
+        synchronized (documentLock) {
+            // Update text
+            String text = textArea.getText();
+            String newText = text.substring(0, position) + text.substring(position + length);
+            textArea.setText(newText);
+
+            // Update character IDs
+            for (int i = 0; i < length; i++) {
+                if (position < characterIds.size()) {
+                    characterIds.remove(position);
+                }
+            }
+        }
+
+        // Send to server
+        sendOperation(deleteOp);
+    }
+    private void executeAndSendInsert(String text, int position) {
+        if (position < 0 || position > characterIds.size()) {
+            System.err.println("Invalid insert position: " + position);
+            return;
+        }
+
+        // Generate IDs for new characters
+        List<String> newIds = new ArrayList<>();
+        long timestamp = System.currentTimeMillis();
+        for (int i = 0; i < text.length(); i++) {
+            newIds.add(clientId + ":" + timestamp + ":" + i);
+        }
+
+        // Create path for the insert operation
+        List<String> path = new ArrayList<>();
+        if (position == 0) {
+            path.add("start");
+        } else if (position >= characterIds.size()) {
+            path.add("end");
+        } else {
+            path.add("after-" + characterIds.get(position - 1));
+        }
+
+        // Create operation
+        Operation insertOp = new Operation(
+                Operation.Type.INSERT,
+                text,
+                path,
+                timestamp,
+                clientId
+        );
+
+        // Execute locally
+        synchronized (documentLock) {
+            // Update text
+            String currentText = textArea.getText();
+            String newText = currentText.substring(0, position) + text +
+                    currentText.substring(position);
+            textArea.setText(newText);
+
+            // Update character IDs
+            characterIds.addAll(position, newIds);
+        }
+
+        // Send to server
+        sendOperation(insertOp);
+    }
+
+    private List<Operation> calculateTextOperations(String source, String target) {
+        List<Operation> operations = new ArrayList<>();
+    
+        // Simple diff algorithm to find common prefix and suffix
+        int prefixLength = 0;
+        int minLength = Math.min(source.length(), target.length());
+    
+        // Find common prefix
+        while (prefixLength < minLength &&
+                source.charAt(prefixLength) == target.charAt(prefixLength)) {
+            prefixLength++;
+        }
+    
+        // Find common suffix
+        int sourceEnd = source.length() - 1;
+        int targetEnd = target.length() - 1;
+        int suffixLength = 0;
+    
+        while (sourceEnd >= prefixLength && targetEnd >= prefixLength &&
+                source.charAt(sourceEnd) == target.charAt(targetEnd)) {
+            sourceEnd--;
+            targetEnd--;
+            suffixLength++;
+        }
+    
+        // Calculate middle sections that differ
+        int deleteLength = source.length() - prefixLength - suffixLength;
+        int insertLength = target.length() - prefixLength - suffixLength;
+    
+        // Add delete operation if needed
+        if (deleteLength > 0) {
+            operations.add(new Operation(prefixLength, deleteLength));
+        }
+    
+        // Add insert operation if needed
+        if (insertLength > 0) {
+            String insertText = target.substring(prefixLength, prefixLength + insertLength);
+            operations.add(new Operation(insertText, prefixLength));
+        }
+    
+        return operations;
+    }
+    
+    private void sendFullStateToServer() {
+        if (stompSession == null || !stompSession.isConnected()) {
+            System.err.println("Cannot send full state: not connected");
+            return;
+        }
+
+        try {
+            EditorMessage message = new EditorMessage();
+            message.setType(EditorMessage.MessageType.FULL_STATE);
+            message.setClientId(clientId);
+            message.setDocumentId(documentId);
+            message.setContent(textArea.getText());
+            message.setCharacterIds(new ArrayList<>(characterIds));
+            message.setTimestamp(System.currentTimeMillis());
+
+            stompSession.send("/app/editor/full-state", message);
+            System.out.println("⇨ Sent full state to server for consistency");
+        } catch (Exception e) {
+            System.err.println("Error sending full state: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+    private void syncToState(UndoRedoState state) {
+        synchronized (documentLock) {
+            try {
+                isApplyingState = true;
+                
+                // Get current text
+                String currentText = textArea.getText();
+                String targetText = state.text;
+                
+                if (currentText.equals(targetText)) {
+                    System.out.println("No text change needed for undo/redo");
+                    return;
+                }
+                
+                // Calculate the difference between current and target
+                List<Operation> editOps = calculateTextOperations(currentText, targetText);
+                System.out.println("Calculated " + editOps.size() + " edit operations for undo/redo");
+                
+                // Apply operations in sequence to maintain consistency
+                for (Operation editOp : editOps) {
+                    if (editOp.type == Operation.Type.DELETE) {
+                        // Handle delete operation
+                        executeAndSendDelete(editOp.position, editOp.length);
+                    } else if (editOp.type == Operation.Type.INSERT) {
+                        // Handle insert operation
+                        executeAndSendInsert(editOp.content, editOp.position);
+                    }
+                }
+                
+                // Final verification
+                if (!textArea.getText().equals(targetText)) {
+                    System.err.println("WARNING: Text mismatch after undo/redo operations");
+                    System.err.println("Expected: " + targetText.length() + " chars");
+                    System.err.println("Actual: " + textArea.getText().length() + " chars");
+                    
+                    // Force sync for consistency
+                    textArea.setText(targetText);
+                    
+                    // Restore character IDs as well
+                    characterIds.clear();
+                    characterIds.addAll(state.characterIds);
+                    
+                    // Send full state to server for consistency
+                    sendFullStateToServer();
+                }
+                
+                // Set caret position
+                if (state.caretPosition >= 0 && state.caretPosition <= textArea.getLength()) {
+                    textArea.positionCaret(state.caretPosition);
+                }
+                
+                previousContent = textArea.getText();
+                System.out.println("Applied undo/redo state successfully");
+            } finally {
+                isApplyingState = false;
+            }
+        }
+    }
+private void performUndo() {
+    if (undoStack.isEmpty()) {
+        System.out.println("Nothing to undo");
+        return;
+    }
+
+    try {
+        // Set flag to prevent recursive undo/redo
+        isUndoRedoOperation = true;
 
         // Get previous state
-        UndoRedoState state = undoStack.pop();
+        UndoRedoState prevState = undoStack.pop();
 
-        // Save current state to redo stack
-        redoStack.push(new UndoRedoState(textArea.getText(), new ArrayList<>(characterIds)));
+        // Save current state to redo stack first
+        redoStack.push(new UndoRedoState(
+            textArea.getText(), 
+            new ArrayList<>(characterIds),
+            textArea.getCaretPosition()
+        ));
+        
+        System.out.println("Performing undo. New redo stack size: " + redoStack.size());
 
-        // Apply previous state
-        isUndoRedoOperation = true;
-        try {
-            isProcessingRemoteOperation.set(true);
-            textArea.setText(state.text);
+        // Instead of complex diffing, use sync-based approach for consistency
+        syncToState(prevState);
+    } catch (Exception e) {
+        System.err.println("Error performing undo: " + e.getMessage());
+        e.printStackTrace();
+        // Request sync from server to recover
+        requestSync();
+    } finally {
+        isUndoRedoOperation = false;
+    }
+}
 
-            synchronized (documentLock) {
-                characterIds.clear();
-                characterIds.addAll(state.characterIds);
-                previousContent = state.text;
-            }
-        } finally {
-            isProcessingRemoteOperation.set(false);
-            isUndoRedoOperation = false;
-        }
+private void performRedo() {
+    if (redoStack.isEmpty()) {
+        System.out.println("Nothing to redo");
+        return;
     }
 
-    private void performRedo() {
-        if (redoStack.isEmpty()) return;
-
-        // Get next state
-        UndoRedoState state = redoStack.pop();
-
-        // Save current state to undo stack
-        undoStack.push(new UndoRedoState(textArea.getText(), new ArrayList<>(characterIds)));
-
-        // Apply next state
+    try {
+        // Set flag to prevent recursive undo/redo
         isUndoRedoOperation = true;
-        try {
-            isProcessingRemoteOperation.set(true);
-            textArea.setText(state.text);
 
-            synchronized (documentLock) {
-                characterIds.clear();
-                characterIds.addAll(state.characterIds);
-                previousContent = state.text;
-            }
-        } finally {
-            isProcessingRemoteOperation.set(false);
-            isUndoRedoOperation = false;
-        }
+        // Get the state to redo
+        UndoRedoState redoState = redoStack.pop();
+
+        // Save current state to undo stack first
+        undoStack.push(new UndoRedoState(
+            textArea.getText(), 
+            new ArrayList<>(characterIds),
+            textArea.getCaretPosition()
+        ));
+        
+        System.out.println("Performing redo. New undo stack size: " + undoStack.size());
+
+        // Use sync-based approach for consistency
+        syncToState(redoState);
+    } catch (Exception e) {
+        System.err.println("Error performing redo: " + e.getMessage());
+        e.printStackTrace();
+        // Request sync from server to recover
+        requestSync();
+    } finally {
+        isUndoRedoOperation = false;
     }
+}
+
 
     private void processPendingEdits() {
         synchronized (pendingDeletePositions) {
             if (pendingDeletePositions.isEmpty()) return;
 
-            // Process all pending deletes as a batch
+            // Process pending deletes as a single batch operation where possible
+            // Sort by position in reverse order to handle deletions from right to left
+            Map<Integer, Integer> mergedDeletes = new TreeMap<>(Collections.reverseOrder());
+
+            // Combine consecutive delete operations at the same position
             for (int i = 0; i < pendingDeletePositions.size(); i++) {
                 int position = pendingDeletePositions.get(i);
                 int length = pendingDeleteLengths.get(i);
+
+                // Merge with existing delete at same position
+                mergedDeletes.put(position, mergedDeletes.getOrDefault(position, 0) + length);
+            }
+
+            // Process each merged delete operation
+            for (Map.Entry<Integer, Integer> entry : mergedDeletes.entrySet()) {
+                int position = entry.getKey();
+                int length = entry.getValue();
                 handleLocalDelete(position, length);
             }
 
@@ -513,8 +1006,18 @@ public class EditorClient extends Application {
                     return;
                 }
 
-                // Get character IDs for the deleted range
-                List<String> deletedCharIds = new ArrayList<>(characterIds.subList(position, endPos));
+                // Get character IDs for the deleted range - make a defensive copy
+                List<String> deletedCharIds = new ArrayList<>();
+                for (int i = position; i < endPos; i++) {
+                    if (i < characterIds.size()) {
+                        deletedCharIds.add(characterIds.get(i));
+                    }
+                }
+
+                if (deletedCharIds.isEmpty()) {
+                    System.err.println("No valid character IDs to delete");
+                    return;
+                }
 
                 // Create paths with char IDs for the CRDT
                 List<String> path = new ArrayList<>();
@@ -523,7 +1026,14 @@ public class EditorClient extends Application {
                 }
 
                 // Create content string for the delete operation
-                String deletedContent = previousContent.substring(position, Math.min(position + actualLength, previousContent.length()));
+                String deletedContent;
+                try {
+                    deletedContent = previousContent.substring(position, Math.min(position + actualLength, previousContent.length()));
+                } catch (StringIndexOutOfBoundsException e) {
+                    System.err.println("String index out of bounds: position=" + position + ", length=" + actualLength +
+                            ", previousContent.length()=" + previousContent.length());
+                    deletedContent = ""; // Fallback to empty string
+                }
 
                 // Create operation
                 Operation operation = new Operation(
@@ -537,8 +1047,10 @@ public class EditorClient extends Application {
                 // Add to operation queue for sending
                 operationQueue.add(operation);
 
-                // Update local state
-                characterIds.subList(position, endPos).clear();
+                // Update local state - use subList clear to efficiently remove a range
+                if (endPos <= characterIds.size()) {
+                    characterIds.subList(position, endPos).clear();
+                }
                 previousContent = textArea.getText();
 
                 System.out.println("⇨ Queued DELETE operation at position " + position +
@@ -546,6 +1058,9 @@ public class EditorClient extends Application {
             } catch (Exception e) {
                 System.err.println("Error handling delete: " + e.getMessage());
                 e.printStackTrace();
+
+                // Request sync if we encounter errors during rapid deletes
+                requestSync();
             }
         }
     }
@@ -570,8 +1085,27 @@ public class EditorClient extends Application {
             }
         }
     }
+    private void requestSync() {
+        if (stompSession != null && stompSession.isConnected()) {
+            try {
+                EditorMessage syncRequest = new EditorMessage();
+                syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
+                syncRequest.setClientId(clientId);
+                syncRequest.setDocumentId(documentId);
+                stompSession.send("/app/editor/operation", syncRequest);
+                System.out.println("⇨ Sent SYNC_REQUEST");
+            } catch (Exception e) {
+                System.err.println("Error sending sync request: " + e.getMessage());
+            }
+        }
+    }
 
+    /**
+ * Handles incoming messages from the server
+ * @param message The incoming editor message
+ */
     private void handleRemoteMessage(EditorMessage message) {
+        // Ignore messages for other documents
         if (!documentId.equals(message.getDocumentId())) return;
 
         Platform.runLater(() -> {
@@ -582,33 +1116,43 @@ public class EditorClient extends Application {
                     // Save caret position
                     int caretPos = textArea.getCaretPosition();
 
-                    if (message.getType() == EditorMessage.MessageType.OPERATION &&
-                            !message.getOperation().getClientId().equals(clientId)) {
+                    if (message.getType() == EditorMessage.MessageType.OPERATION) {
                         Operation op = message.getOperation();
 
-                        // Save state for undo before applying remote changes
-                        saveStateForUndo(textArea.getText());
+                        // Only process operations from other clients
+                        if (!op.getClientId().equals(clientId)) {
+                            // Save current state for undo
+                            if (!isUndoRedoOperation && !isApplyingState) {
+                                saveStateForUndo();
+                            }
 
-                        if (op.getType() == Operation.Type.INSERT) {
-                            processRemoteInsert(op, caretPos);
-                        } else if (op.getType() == Operation.Type.DELETE) {
-                            processRemoteDelete(op, caretPos);
+                            if (op.getType() == Operation.Type.INSERT) {
+                                processRemoteInsert(op, caretPos);
+                            } else if (op.getType() == Operation.Type.DELETE) {
+                                processRemoteDelete(op, caretPos);
+                            }
                         }
 
                         // Validate state after operation
                         validateClientState();
                     } else if (message.getType() == EditorMessage.MessageType.SYNC_RESPONSE) {
                         // Save state for undo before syncing
-                        if (!textArea.getText().isEmpty()) {
-                            saveStateForUndo(textArea.getText());
+                        if (!textArea.getText().isEmpty() && !isUndoRedoOperation && !isApplyingState) {
+                            saveStateForUndo();
                         }
 
+                        processSyncResponse(message, caretPos);
+                    } else if (message.getType() == EditorMessage.MessageType.FULL_STATE) {
+                        // Process full state message (if your server implements this)
                         processSyncResponse(message, caretPos);
                     }
 
                 } catch (Exception e) {
                     System.err.println("Error handling remote message: " + e.getMessage());
                     e.printStackTrace();
+
+                    // Request a sync on error
+                    requestSync();
                 } finally {
                     isProcessingRemoteOperation.set(false);
                 }
@@ -616,145 +1160,161 @@ public class EditorClient extends Application {
         });
     }
 
-    private void processRemoteInsert(Operation op, int caretPos) {
-        try {
-            // Calculate the position to insert
-            int pos = calculatePositionFromPath(op.getPath());
-            pos = Math.max(0, Math.min(pos, textArea.getText().length()));
+    /**
+ * Processes a remote insert operation
+ * @param op The insert operation
+ * @param caretPos Current caret position
+ */
+private void processRemoteInsert(Operation op, int caretPos) {
+    try {
+        // Calculate the position to insert based on path
+        int pos = calculatePositionFromPath(op.getPath());
+        pos = Math.max(0, Math.min(pos, textArea.getText().length()));
 
-            // Create character IDs for inserted content
-            List<String> charIds = new ArrayList<>();
-            for (int i = 0; i < op.getContent().length(); i++) {
-                charIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
+        // Create character IDs for inserted content
+        List<String> charIds = new ArrayList<>();
+        for (int i = 0; i < op.getContent().length(); i++) {
+            charIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
+        }
+
+        // Insert the content and update character IDs
+        String currentText = textArea.getText();
+        String newText = currentText.substring(0, pos) + op.getContent() +
+                currentText.substring(pos);
+        textArea.setText(newText);
+        characterIds.addAll(pos, charIds);
+
+        // Update caret position intelligently
+        if (pos <= caretPos) {
+            textArea.positionCaret(caretPos + op.getContent().length());
+        } else {
+            textArea.positionCaret(caretPos);
+        }
+
+        // Update state
+        previousContent = textArea.getText();
+        System.out.println("Applied remote INSERT: " + op.getContent().length() + " chars at position " + pos);
+    } catch (Exception e) {
+        System.err.println("Error processing remote insert: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+
+    /**
+ * Processes a remote delete operation
+ * @param op The delete operation
+ * @param caretPos Current caret position
+ */
+private void processRemoteDelete(Operation op, int caretPos) {
+    try {
+        // Collect all positions to delete, in reverse order
+        Set<Integer> positionsToDelete = new TreeSet<>(Collections.reverseOrder());
+
+        // Get positions from character IDs in the path
+        for (String pathEntry : op.getPath()) {
+            if (pathEntry.startsWith("char-")) {
+                String charId = pathEntry.substring(5);
+                int index = characterIds.indexOf(charId);
+                if (index != -1) {
+                    positionsToDelete.add(index);
+                }
             }
+        }
 
-            // Insert the content and update character IDs
-            String currentText = textArea.getText();
-            String newText = currentText.substring(0, pos) + op.getContent() +
-                    currentText.substring(pos);
-            textArea.setText(newText);
-            characterIds.addAll(pos, charIds);
+        if (positionsToDelete.isEmpty()) {
+            System.out.println("No valid positions found for remote DELETE operation");
+            return;
+        }
 
-            // Update caret position if needed
-            if (pos <= caretPos) {
-                textArea.positionCaret(caretPos + op.getContent().length());
+        // Build a new text by removing characters at specific positions
+        StringBuilder sb = new StringBuilder(textArea.getText());
+        int caretAdjustment = 0;
+
+        // Delete in reverse order to avoid index shifting issues
+        for (int pos : positionsToDelete) {
+            if (pos >= 0 && pos < sb.length()) {
+                sb.deleteCharAt(pos);
+
+                // Remove character ID
+                if (pos < characterIds.size()) {
+                    characterIds.remove(pos);
+                }
+
+                // Adjust caret position if deletion is before it
+                if (pos < caretPos) {
+                    caretAdjustment--;
+                }
+            }
+        }
+
+        // Update text area with modified content
+        textArea.setText(sb.toString());
+
+        // Set adjusted caret position
+        int newCaretPos = Math.max(0, Math.min(caretPos + caretAdjustment, textArea.getLength()));
+        textArea.positionCaret(newCaretPos);
+        previousContent = textArea.getText();
+
+        System.out.println("Applied remote DELETE for " + positionsToDelete.size() + " characters");
+    } catch (Exception e) {
+        System.err.println("Error processing remote delete: " + e.getMessage());
+        e.printStackTrace();
+    }
+}
+
+    /**
+ * Processes a sync response from the server
+ * @param message The sync response message
+ * @param caretPos Current caret position
+ */
+private void processSyncResponse(EditorMessage message, int caretPos) {
+    try {
+        String content = message.getContent();
+        List<String> serverCharIds = message.getCharacterIds();
+
+        if (content != null) {
+            // Update text content
+            textArea.setText(content);
+
+            // Use server-provided character IDs when available
+            if (serverCharIds != null && !serverCharIds.isEmpty()) {
+                System.out.println("Using " + serverCharIds.size() + " character IDs from server");
+                characterIds.clear();
+                characterIds.addAll(serverCharIds);
             } else {
-                textArea.positionCaret(caretPos);
+                // Fall back to generating new IDs if none provided
+                characterIds.clear();
+                for (int i = 0; i < content.length(); i++) {
+                    characterIds.add("sync:" + System.currentTimeMillis() + ":" + i);
+                }
+                System.out.println("Server did not provide character IDs, generated " + characterIds.size() + " new IDs");
             }
 
             // Update state
-            previousContent = textArea.getText();
-            System.out.println("Applied remote INSERT: " + op.getContent().length() + " chars at position " + pos);
-        } catch (Exception e) {
-            System.err.println("Error processing remote insert: " + e.getMessage());
-            e.printStackTrace();
+            previousContent = content;
+            System.out.println("Applied SYNC_RESPONSE with content length: " + content.length());
+
+            // Validate that character ID count matches content length
+            if (characterIds.size() != content.length()) {
+                System.err.println("WARNING: Character ID count (" + characterIds.size() +
+                        ") does not match content length (" + content.length() + ")");
+            }
+        } else {
+            // Handle empty document
+            textArea.setText("");
+            characterIds.clear();
+            previousContent = "";
+            System.out.println("Applied SYNC_RESPONSE with empty content");
         }
+
+        // Adjust caret position
+        int newPos = Math.min(caretPos, textArea.getLength());
+        textArea.positionCaret(newPos);
+    } catch (Exception e) {
+        System.err.println("Error processing sync response: " + e.getMessage());
+        e.printStackTrace();
     }
-
-    private void processRemoteDelete(Operation op, int caretPos) {
-        try {
-            Set<Integer> positionsToDelete = new TreeSet<>(Collections.reverseOrder());
-
-            // Get positions from character IDs in the path
-            for (String pathEntry : op.getPath()) {
-                if (pathEntry.startsWith("char-")) {
-                    String charId = pathEntry.substring(5);
-                    int index = characterIds.indexOf(charId);
-                    if (index != -1) {
-                        positionsToDelete.add(index);
-                    }
-                }
-            }
-
-            if (positionsToDelete.isEmpty()) {
-                System.out.println("No valid positions found for remote DELETE operation");
-                return;
-            }
-
-            // Build a new text by removing characters at specific positions
-            StringBuilder sb = new StringBuilder(textArea.getText());
-            int caretAdjustment = 0;
-
-            // Delete in reverse order to avoid index shifting issues
-            for (int pos : positionsToDelete) {
-                if (pos >= 0 && pos < sb.length()) {
-                    sb.deleteCharAt(pos);
-
-                    // Remove character ID
-                    if (pos < characterIds.size()) {
-                        characterIds.remove(pos);
-                    }
-
-                    // Adjust caret position if needed
-                    if (pos < caretPos) {
-                        caretAdjustment--;
-                    }
-                }
-            }
-
-            // Update text area with modified content
-            textArea.setText(sb.toString());
-
-            // Set caret position and update state
-            int newCaretPos = Math.max(0, Math.min(caretPos + caretAdjustment, textArea.getLength()));
-            textArea.positionCaret(newCaretPos);
-            previousContent = textArea.getText();
-
-            System.out.println("Applied remote DELETE for " + positionsToDelete.size() + " characters");
-        } catch (Exception e) {
-            System.err.println("Error processing remote delete: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-
-    private void processSyncResponse(EditorMessage message, int caretPos) {
-        try {
-            String content = message.getContent();
-            List<String> serverCharIds = message.getCharacterIds();
-
-            if (content != null) {
-                // Update text content
-                textArea.setText(content);
-
-                // Use server-provided character IDs when available
-                if (serverCharIds != null && !serverCharIds.isEmpty()) {
-                    System.out.println("Using " + serverCharIds.size() + " character IDs from server");
-                    characterIds.clear();
-                    characterIds.addAll(serverCharIds);
-                } else {
-                    // Fall back to generating new IDs if none provided
-                    characterIds.clear();
-                    for (int i = 0; i < content.length(); i++) {
-                        characterIds.add("sync:" + System.currentTimeMillis() + ":" + i);
-                    }
-                    System.out.println("Server did not provide character IDs, generated " + characterIds.size() + " new IDs");
-                }
-
-                // Update state
-                previousContent = content;
-                System.out.println("Applied SYNC_RESPONSE with content length: " + content.length());
-
-                // Validate that character ID count matches content length
-                if (characterIds.size() != content.length()) {
-                    System.err.println("WARNING: Character ID count (" + characterIds.size() +
-                            ") does not match content length (" + content.length() + ")");
-                }
-            } else {
-                // Empty document
-                textArea.setText("");
-                characterIds.clear();
-                previousContent = "";
-                System.out.println("Applied SYNC_RESPONSE with empty content");
-            }
-
-            // Adjust caret position
-            int newPos = Math.min(caretPos, textArea.getLength());
-            textArea.positionCaret(newPos);
-        } catch (Exception e) {
-            System.err.println("Error processing sync response: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
+}
 
     private int calculatePositionFromPath(List<String> path) {
         if (path == null || path.isEmpty()) return 0;
@@ -788,25 +1348,16 @@ public class EditorClient extends Application {
     }
 
     private void validateClientState() {
-        int textLength = textArea.getText().length();
-        int charIdsCount = characterIds.size();
+        if (!isUndoRedoOperation && !isApplyingState) {
+            int textLength = textArea.getText().length();
+            int charIdsCount = characterIds.size();
 
-        if (textLength != charIdsCount) {
-            System.err.println("WARNING: Client state inconsistency detected!");
-            System.err.println("Text length: " + textLength + ", Character IDs count: " + charIdsCount);
+            if (textLength != charIdsCount) {
+                System.err.println("WARNING: Client state inconsistency detected!");
+                System.err.println("Text length: " + textLength + ", Character IDs count: " + charIdsCount);
 
-            // Request a fresh sync from server to fix the inconsistency
-            if (stompSession != null) {
-                try {
-                    EditorMessage syncRequest = new EditorMessage();
-                    syncRequest.setType(EditorMessage.MessageType.SYNC_REQUEST);
-                    syncRequest.setClientId(clientId);
-                    syncRequest.setDocumentId(documentId);
-                    stompSession.send("/app/editor/operation", syncRequest);
-                    System.out.println("⇨ Sent SYNC_REQUEST to recover from inconsistent state");
-                } catch (Exception e) {
-                    System.err.println("Error sending sync request: " + e.getMessage());
-                }
+                // Request a sync to fix the inconsistency
+                requestSync();
             }
         }
     }
@@ -833,15 +1384,23 @@ public class EditorClient extends Application {
             }
         }
     }
-    private static class UndoRedoState {
-        final String text;
-        final List<String> characterIds;
+    
+/**
+ * Enhanced UndoRedoState class to track all necessary state information
+ */
+private static class UndoRedoState {
+    final String text;
+    final List<String> characterIds;
+    final int caretPosition;
+    final long timestamp;
 
-        UndoRedoState(String text, List<String> characterIds) {
-            this.text = text;
-            this.characterIds = characterIds;
-        }
+    UndoRedoState(String text, List<String> characterIds, int caretPosition) {
+        this.text = text;
+        this.characterIds = new ArrayList<>(characterIds);
+        this.caretPosition = caretPosition;
+        this.timestamp = System.currentTimeMillis();
     }
+}
 
     public static void main(String[] args) {
         launch(args);

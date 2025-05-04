@@ -8,15 +8,32 @@ public class Operation {
         DELETE
     }
 
-    private Type type;
-    private String content;
+    public Type type;
+    public String content;
     private List<String> path;
     private long timestamp;
     private String clientId;
+    public int position;
+    public int length;
 
     public Operation() {
     }
+    public Operation(int position, int length) {
+        this.type = Type.DELETE;
+        this.position = position;
+        this.length = length;
+    }
 
+    /**
+     * Constructor for insert operations
+     * @param text Text to insert
+     * @param position Position to insert at
+     */
+    public Operation(String text, int position) {
+        this.type = Type.INSERT;
+        this.content = text;
+        this.position = position;
+    }
     public Operation(Type type, String content, List<String> path, long timestamp, String clientId) {
         this.type = type;
         this.content = content;

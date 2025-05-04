@@ -8,7 +8,7 @@ public class EditorMessage {
     public enum MessageType {
         SYNC_REQUEST,
         SYNC_RESPONSE,
-        OPERATION
+        OPERATION, FULL_STATE
     }
 
     private MessageType type;
@@ -77,5 +77,10 @@ public class EditorMessage {
                 ", operation=" + operation +
                 ", characterIds=" + (characterIds != null ? characterIds.size() : 0) + " ids" +
                 '}';
+    }
+
+    public void setTimestamp(long timeMillis) {
+        // TODO Auto-generated method stub
+        throw new UnsupportedOperationException("Unimplemented method 'setTimestamp'");
     }
 }
