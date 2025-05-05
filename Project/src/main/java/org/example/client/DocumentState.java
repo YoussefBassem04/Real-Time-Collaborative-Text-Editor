@@ -5,6 +5,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.beans.property.StringProperty;
+import javafx.collections.FXCollections;
+import javafx.collections.ObservableList;
 import org.example.crdt.Operation;
 
 public class DocumentState {
@@ -30,7 +32,10 @@ public class DocumentState {
         this.documentId = documentId;
         recentDocuments.add(documentId);
     }
-
+    private final ObservableList<String> connectedUsers = FXCollections.observableArrayList();
+    public ObservableList<String> getConnectedUsers() {
+        return connectedUsers;
+    }
     public String getClientId() {
         return clientId;
     }
