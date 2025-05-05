@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.Set;
@@ -48,33 +49,33 @@ public class CollaborationService {
         READ_ONLY
     }
 
-    public JSONObject createNewRoom() throws JSONException {
+    public Map<String, Object> createNewRoom() {
     String editRoomId = UUID.randomUUID().toString();
     String readOnlyRoomId = UUID.randomUUID().toString();
     roomIds.put(editRoomId, readOnlyRoomId);
     
-    JSONObject responseJson = new JSONObject();
-    responseJson.put("editRoomId", editRoomId);
-    responseJson.put("readOnlyRoomId", readOnlyRoomId);
+    Map<String, Object> response = new HashMap<>();
+    response.put("editRoomId", editRoomId);
+    response.put("readOnlyRoomId", readOnlyRoomId);
     
-    return responseJson;
+    return response;
 }
 
 
-    public JSONObject joinRoom(String roomId) throws JSONException {
-        JSONObject responseJson = new JSONObject();
+    public Map<String, Object> joinRoom(String roomId) {
+        Map<String, Object> response = new HashMap<>();
         if (roomIds.containsKey(roomId)) {
-            responseJson.put("editRoomId", roomId);
-            responseJson.put("readOnlyRoomId", roomIds.get(roomId));
-            responseJson.put("canEdit", true);
-            return responseJson;
+            response.put("editRoomId", roomId);
+            response.put("readOnlyRoomId", roomIds.get(roomId));
+            response.put("canEdit", true);
+            return response;
         }
         if (roomIds.values().contains(roomId)) {
             //join, but don't edit
-            responseJson.put("editRoomId", "You can't edit this");
-            responseJson.put("readOnlyRoomId", roomId);
-            responseJson.put("canEdit", false);
-            return responseJson;
+            response.put("editRoomId", "You can't edit this");
+            response.put("readOnlyRoomId", roomId);
+            response.put("canEdit", false);
+            return response;
         }
         else {
             //throw exception

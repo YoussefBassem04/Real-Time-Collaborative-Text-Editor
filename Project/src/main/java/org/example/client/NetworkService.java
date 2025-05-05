@@ -3,6 +3,7 @@ package org.example.client;
 import javafx.beans.property.StringProperty;
 import org.example.crdt.Operation;
 import org.example.model.EditorMessage;
+import org.json.JSONObject;
 import org.springframework.messaging.converter.MappingJackson2MessageConverter;
 import org.springframework.messaging.simp.stomp.*;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
@@ -13,6 +14,10 @@ import org.springframework.web.socket.sockjs.client.WebSocketTransport;
 import javafx.application.Platform;
 
 import java.lang.reflect.Type;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -20,12 +25,51 @@ public class NetworkService {
     private StompSession stompSession;
     private final EditorController controller;
     private final DocumentState documentState;
+    private static final HttpClient httpClient = HttpClient.newHttpClient();
+    private static String baseUrl = "http://localhost:8080"; //change to server IP on discussion
 
     public NetworkService(EditorController controller) {
         this.controller = controller;
         this.documentState = controller.getDocumentState();
         // Explicitly set initial connection status
         Platform.runLater(() -> documentState.getConnectionStatus().set("Connecting..."));
+    }
+
+    public JSONObject createNewRoom() throws Exception {
+        try {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/room/create"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        System.out.println("Response: " + response.body());
+        return new JSONObject(response.body());
+        } catch (Exception e) {
+            JSONObject errorResponse = new JSONObject();
+            errorResponse.put("error", true);
+            errorResponse.put("message", "Failed to connect to server: " + e.getMessage());
+            return errorResponse;
+        }
+    }
+    
+    public JSONObject joinRoom(String roomId) throws Exception {
+        try {
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create(baseUrl + "/room/" + roomId + "/join"))
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+        return new JSONObject(response.body());
+        } catch (Exception e) {
+            JSONObject errorResponse = new JSONObject();
+            errorResponse.put("error", true);
+            errorResponse.put("message", "Failed to connect to server: " + e.getMessage());
+            return errorResponse;
+        }
     }
 
     public void connectToWebSocket() {
@@ -37,7 +81,7 @@ public class NetworkService {
         WebSocketStompClient stompClient = new WebSocketStompClient(new SockJsClient(transports));
         stompClient.setMessageConverter(new MappingJackson2MessageConverter());
 
-        stompClient.connect("ws://localhost:8080/ws", new StompSessionHandlerAdapter() {
+        stompClient.connectAsync("ws://localhost:8080/ws", new StompSessionHandlerAdapter() {
             @Override
             public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
                 stompSession = session;

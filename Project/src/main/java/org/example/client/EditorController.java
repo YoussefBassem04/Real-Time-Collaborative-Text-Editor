@@ -2,6 +2,8 @@ package org.example.client;
 
 import org.example.crdt.Operation;
 import org.example.model.EditorMessage;
+import org.json.JSONObject;
+
 import javafx.scene.control.TextArea;
 
 public class EditorController {
@@ -9,6 +11,9 @@ public class EditorController {
     private final NetworkService networkService;
     private final UndoRedoService undoRedoService;
     private final OperationService operationService;
+    private String editRoomId;
+    private String readOnlyRoomId;
+    private Boolean canEdit;
 
     public EditorController() {
         this.documentState = new DocumentState();
@@ -19,6 +24,14 @@ public class EditorController {
 
     public void initialize() {
         networkService.connectToWebSocket();
+    }
+
+    public JSONObject createNewRoom() throws Exception {
+        return networkService.createNewRoom();
+    }
+
+    public JSONObject joinRoom(String roomId) throws Exception {
+        return networkService.joinRoom(roomId);
     }
 
     public void connectToDocument(String docId) {
@@ -49,6 +62,11 @@ public class EditorController {
     public void setupKeyHandling(TextArea textArea) {
         operationService.setupKeyHandling(textArea);
     }
+    public void setRoomInfo(String editRoomId, String readOnlyRoomId, boolean canEdit) {
+        this.editRoomId = editRoomId;
+        this.readOnlyRoomId = readOnlyRoomId;
+        this.canEdit = canEdit;
+    }
 
     // Getters
     public DocumentState getDocumentState() {
@@ -65,5 +83,17 @@ public class EditorController {
 
     public OperationService getOperationService() {
         return operationService;
+    }
+    public String getEditRoomId() {
+        return editRoomId;
+    }
+    public String getReadOnlyRoomId() {
+        return readOnlyRoomId;
+    }
+    public boolean canEdit() {
+        return canEdit;
+    }
+    public String getActiveRoomId() {
+        return canEdit ? editRoomId : readOnlyRoomId;
     }
 }
