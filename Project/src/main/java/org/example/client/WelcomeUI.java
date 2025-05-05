@@ -141,7 +141,7 @@ public class WelcomeUI {
         primaryStage.setTitle("Collaborative Editor - " + mode + " Mode");
         
         // Initialize editor with the active room ID
-        controller.connectToDocument(controller.getActiveRoomId());
+        controller.connectToDocument(controller.getReadOnlyRoomId());
     }
     
     private void showError(String message) {
