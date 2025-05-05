@@ -17,8 +17,8 @@ public class OperationService {
     private final DocumentState documentState;
     private Timeline operationFlushTimer;
     private Timeline batchTimer;
-    private final List<Integer> pendingDeletePositions = new ArrayList<>();
-    private final List<Integer> pendingDeleteLengths = new ArrayList<>();
+    final List<Integer> pendingDeletePositions = new ArrayList<>();
+    final List<Integer> pendingDeleteLengths = new ArrayList<>();
     private TextArea textArea;
 
     public TextArea getTextArea() {
