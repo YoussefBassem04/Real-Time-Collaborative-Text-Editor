@@ -2,20 +2,23 @@ package org.example.model;
 
 import org.example.crdt.Operation;
 
+import java.util.List;
+
 public class EditorMessage {
     public enum MessageType {
-        OPERATION,
         SYNC_REQUEST,
         SYNC_RESPONSE,
-        REDO,
-        UNDO
+        OPERATION,
+        USER_LIST
     }
 
     private MessageType type;
     private String clientId;
+    private String documentId;
     private String content;
     private Operation operation;
-    private String documentId;
+    private List<String> characterIds;
+    private List<String> connectedUsers;
 
     public MessageType getType() {
         return type;
@@ -31,6 +34,14 @@ public class EditorMessage {
 
     public void setClientId(String clientId) {
         this.clientId = clientId;
+    }
+
+    public String getDocumentId() {
+        return documentId;
+    }
+
+    public void setDocumentId(String documentId) {
+        this.documentId = documentId;
     }
 
     public String getContent() {
@@ -49,12 +60,20 @@ public class EditorMessage {
         this.operation = operation;
     }
 
-    public String getDocumentId() {
-        return documentId;
+    public List<String> getCharacterIds() {
+        return characterIds;
     }
 
-    public void setDocumentId(String documentId) {
-        this.documentId = documentId;
+    public void setCharacterIds(List<String> characterIds) {
+        this.characterIds = characterIds;
+    }
+
+    public List<String> getConnectedUsers() {
+        return connectedUsers;
+    }
+
+    public void setConnectedUsers(List<String> connectedUsers) {
+        this.connectedUsers = connectedUsers;
     }
 
     @Override
@@ -62,9 +81,11 @@ public class EditorMessage {
         return "EditorMessage{" +
                 "type=" + type +
                 ", clientId='" + clientId + '\'' +
+                ", documentId='" + documentId + '\'' +
                 ", content='" + (content != null ? (content.length() > 20 ? content.substring(0, 20) + "..." : content) : null) + '\'' +
                 ", operation=" + operation +
-                ", documentId='" + documentId + '\'' +
+                ", characterIds=" + (characterIds != null ? characterIds.size() : 0) + " ids" +
+                ", connectedUsers=" + (connectedUsers != null ? connectedUsers.size() : 0) + " users" +
                 '}';
     }
 }
