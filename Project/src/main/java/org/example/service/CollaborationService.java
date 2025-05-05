@@ -44,16 +44,17 @@ public class CollaborationService {
     }
 
     public Map<String, Object> createNewRoom() {
-    String editRoomId = UUID.randomUUID().toString();
-    String readOnlyRoomId = UUID.randomUUID().toString();
-    roomIds.put(editRoomId, readOnlyRoomId);
-    
-    Map<String, Object> response = new HashMap<>();
-    response.put("editRoomId", editRoomId);
-    response.put("readOnlyRoomId", readOnlyRoomId);
-    
-    return response;
-}
+        String editRoomId = UUID.randomUUID().toString();
+        String readOnlyRoomId = UUID.randomUUID().toString();
+        roomIds.put(editRoomId, readOnlyRoomId);
+        documentConnectedUsers.put(editRoomId, ConcurrentHashMap.newKeySet());
+        
+        Map<String, Object> response = new HashMap<>();
+        response.put("editRoomId", editRoomId);
+        response.put("readOnlyRoomId", readOnlyRoomId);
+        
+        return response;
+    }
 
 
     public Map<String, Object> joinRoom(String roomId) {
