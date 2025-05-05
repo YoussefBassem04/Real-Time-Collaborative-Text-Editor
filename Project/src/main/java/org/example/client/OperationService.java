@@ -302,9 +302,23 @@ public class OperationService {
             charIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
         }
     
+        // Save current caret position
+        int caretPos = textArea.getCaretPosition();
+        
         String currentText = textArea.getText();
         String newText = currentText.substring(0, pos) + op.getContent() + currentText.substring(pos);
         textArea.setText(newText);
+        
+        // Adjust caret position if insertion happened before it
+        if (pos < caretPos) {
+            caretPos += op.getContent().length();
+        }
+        
+        // Restore caret position
+        if (caretPos >= 0 && caretPos <= newText.length()) {
+            textArea.positionCaret(caretPos);
+        }
+        
         documentState.getCharacterIds().addAll(pos, charIds);
         documentState.setPreviousContent(newText);
     }
@@ -326,17 +340,36 @@ public class OperationService {
             return;
         }
     
+        // Save current caret position
+        int caretPos = textArea.getCaretPosition();
+        
         StringBuilder sb = new StringBuilder(textArea.getText());
+        
+        int caretAdjustment = 0;
         for (int pos : positionsToDelete) {
             if (pos >= 0 && pos < sb.length()) {
+                // If character being deleted is before caret, adjust caret position
+                if (pos < caretPos) {
+                    caretAdjustment--;
+                }
+                
                 sb.deleteCharAt(pos);
                 if (pos < documentState.getCharacterIds().size()) {
                     documentState.getCharacterIds().remove(pos);
                 }
             }
         }
-        textArea.setText(sb.toString());
-        documentState.setPreviousContent(sb.toString());
+        
+        String newText = sb.toString();
+        textArea.setText(newText);
+        
+        // Adjust and restore caret position
+        caretPos += caretAdjustment;
+        if (caretPos >= 0 && caretPos <= newText.length()) {
+            textArea.positionCaret(caretPos);
+        }
+        
+        documentState.setPreviousContent(newText);
     }
 
     private void processRemoteInsert(Operation op) {
@@ -348,14 +381,55 @@ public class OperationService {
             charIds.add(op.getClientId() + ":" + op.getTimestamp() + ":" + i);
         }
 
+        // Save current caret position
+        int caretPos = textArea.getCaretPosition();
+        int selectionStart = textArea.getSelection().getStart();
+        int selectionEnd = textArea.getSelection().getEnd();
+        boolean hasSelection = selectionStart != selectionEnd;
+
         String currentText = textArea.getText();
         String newText = currentText.substring(0, pos) + op.getContent() + currentText.substring(pos);
         textArea.setText(newText);
+        
+        // Adjust caret position if text was inserted before it
+        if (pos < caretPos) {
+            caretPos += op.getContent().length();
+        }
+        
+        // Adjust selection if needed
+        if (hasSelection) {
+            int newSelectionStart = selectionStart;
+            int newSelectionEnd = selectionEnd;
+            
+            if (pos < selectionStart) {
+                newSelectionStart += op.getContent().length();
+            }
+            if (pos < selectionEnd) {
+                newSelectionEnd += op.getContent().length();
+            }
+            
+            // Restore selection
+            if (newSelectionStart >= 0 && newSelectionEnd <= newText.length()) {
+                textArea.selectRange(newSelectionStart, newSelectionEnd);
+            } else {
+                // Fall back to just positioning the caret
+                if (caretPos >= 0 && caretPos <= newText.length()) {
+                    textArea.positionCaret(caretPos);
+                }
+            }
+        } else {
+            // Restore caret position
+            if (caretPos >= 0 && caretPos <= newText.length()) {
+                textArea.positionCaret(caretPos);
+            }
+        }
+
         documentState.getCharacterIds().addAll(pos, charIds);
         documentState.setPreviousContent(newText);
     }
 
     private void processRemoteDelete(Operation op) {
+        // Get all positions to delete, sorted in reverse order to avoid index shifts
         Set<Integer> positionsToDelete = new TreeSet<>(Collections.reverseOrder());
         for (String pathEntry : op.getPath()) {
             if (pathEntry.startsWith("char-")) {
@@ -367,20 +441,74 @@ public class OperationService {
             }
         }
 
+        // Save current caret position and selection
+        int caretPos = textArea.getCaretPosition();
+        int selectionStart = textArea.getSelection().getStart();
+        int selectionEnd = textArea.getSelection().getEnd();
+        boolean hasSelection = selectionStart != selectionEnd;
+
         StringBuilder sb = new StringBuilder(textArea.getText());
+        int caretAdjustment = 0;
+        
         for (int pos : positionsToDelete) {
             if (pos >= 0 && pos < sb.length()) {
+                // If deletion affects caret position
+                if (pos < caretPos) {
+                    caretAdjustment--;
+                }
+                
                 sb.deleteCharAt(pos);
                 if (pos < documentState.getCharacterIds().size()) {
                     documentState.getCharacterIds().remove(pos);
                 }
             }
         }
-        textArea.setText(sb.toString());
-        documentState.setPreviousContent(sb.toString());
+
+        String newText = sb.toString();
+        textArea.setText(newText);
+        
+        // Adjust selection if needed
+        if (hasSelection) {
+            int newSelectionStart = selectionStart;
+            int newSelectionEnd = selectionEnd;
+            
+            // Adjust selection start if characters were deleted before it
+            for (int pos : positionsToDelete) {
+                if (pos < selectionStart) {
+                    newSelectionStart--;
+                }
+                if (pos < selectionEnd) {
+                    newSelectionEnd--;
+                }
+            }
+            
+            // Ensure selection bounds are within text bounds
+            newSelectionStart = Math.max(0, Math.min(newSelectionStart, newText.length()));
+            newSelectionEnd = Math.max(0, Math.min(newSelectionEnd, newText.length()));
+            
+            // Restore selection if it still exists
+            if (newSelectionStart != newSelectionEnd) {
+                textArea.selectRange(newSelectionStart, newSelectionEnd);
+            } else {
+                // Fall back to positioning caret
+                caretPos += caretAdjustment;
+                caretPos = Math.max(0, Math.min(caretPos, newText.length()));
+                textArea.positionCaret(caretPos);
+            }
+        } else {
+            // Adjust and restore caret position
+            caretPos += caretAdjustment;
+            caretPos = Math.max(0, Math.min(caretPos, newText.length()));
+            textArea.positionCaret(caretPos);
+        }
+
+        documentState.setPreviousContent(newText);
     }
 
     private void processSyncOperation(Operation op) {
+        // Save current caret position
+        int caretPos = textArea.getCaretPosition();
+        
         if (op.getContent() != null) {
             textArea.setText(op.getContent());
 
@@ -404,6 +532,14 @@ public class OperationService {
                 pendingDeletePositions.clear();
                 pendingDeleteLengths.clear();
             }
+            
+            // Try to maintain caret position within bounds
+            if (caretPos > op.getContent().length()) {
+                caretPos = op.getContent().length();
+            }
+            if (caretPos >= 0) {
+                textArea.positionCaret(caretPos);
+            }
         } else {
             textArea.setText("");
             documentState.getCharacterIds().clear();
@@ -412,6 +548,9 @@ public class OperationService {
     }
 
     private void processSyncResponse(EditorMessage message) {
+        // Save current caret position
+        int caretPos = textArea.getCaretPosition();
+        
         String content = message.getContent();
         if (content != null) {
             textArea.setText(content);
@@ -425,6 +564,14 @@ public class OperationService {
                 }
             }
             documentState.setPreviousContent(content);
+            
+            // Try to maintain caret position within bounds
+            if (caretPos > content.length()) {
+                caretPos = content.length();
+            }
+            if (caretPos >= 0) {
+                textArea.positionCaret(caretPos);
+            }
         } else {
             textArea.setText("");
             documentState.getCharacterIds().clear();

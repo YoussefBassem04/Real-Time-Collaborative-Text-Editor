@@ -86,20 +86,17 @@ public class CollaborationService {
         }
 
         String clientId = message.getClientId();
+        System.out.println("Client ID processed:" + clientId);
+        System.out.println("Document ID processed:" + documentId);
         if (clientId != null) {
             clientDocumentMap.put(clientId, documentId);
             documentConnectedUsers.computeIfAbsent(documentId, k -> ConcurrentHashMap.newKeySet()).add(clientId);
             broadcastUserList(documentId);
         }
-
-        Object documentLock = documentLocks.computeIfAbsent(documentId, k -> new Object());
-
-        synchronized (documentLock) {
             documentContents.putIfAbsent(documentId, new StringBuilder());
             StringBuilder currentContent = documentContents.get(documentId);
 
             documentCharacterIds.putIfAbsent(documentId, new ArrayList<>());
-            List<String> charIds = documentCharacterIds.get(documentId);
 
             switch (message.getType()) {
                 case SYNC_REQUEST:
@@ -119,8 +116,6 @@ public class CollaborationService {
                 case USER_LIST:
                     return message;
             }
-        }
-
         return null;
     }
 
@@ -323,7 +318,10 @@ public class CollaborationService {
     }
 
     public void handleClientDisconnect(String clientId) {
-        String documentId = clientDocumentMap.remove(clientId);
+        System.out.println("Document map state:" + clientDocumentMap);
+        String documentId = clientDocumentMap.get(clientId);
+        clientDocumentMap.remove(clientId);
+        System.out.println("DocumentID user disconnected from:" + documentId);
         if (documentId != null) {
             Set<String> connectedUsers = documentConnectedUsers.get(documentId);
             if (connectedUsers != null) {

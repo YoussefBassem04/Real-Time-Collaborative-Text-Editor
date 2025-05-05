@@ -13,9 +13,7 @@ import javafx.stage.Stage;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-/**
- * UI for handling room creation and joining functionality before launching the editor
- */
+
 public class WelcomeUI {
     private final Stage primaryStage;
     private final EditorController controller;
@@ -32,11 +30,9 @@ public class WelcomeUI {
         BorderPane root = new BorderPane();
         root.setPadding(new Insets(20));
         
-        // Title
         Label titleLabel = new Label("Collaborative Editor");
         titleLabel.setStyle("-fx-font-size: 24px; -fx-font-weight: bold;");
         
-        // Create Room Button
         Button createRoomButton = new Button("Create New Room");
         createRoomButton.setPrefWidth(200);
         createRoomButton.setOnAction(e -> {
@@ -47,7 +43,6 @@ public class WelcomeUI {
             }
         });
         
-        // Room ID input
         Label roomIdLabel = new Label("Room ID:");
         roomIdField = new TextField();
         roomIdField.setPromptText("Enter room ID to join");
@@ -57,7 +52,6 @@ public class WelcomeUI {
         roomIdBox.setAlignment(Pos.CENTER);
         roomIdBox.getChildren().addAll(roomIdLabel, roomIdField);
         
-        // Join Room Button
         Button joinRoomButton = new Button("Join Room");
         joinRoomButton.setPrefWidth(200);
         joinRoomButton.setOnAction(e -> {
@@ -68,7 +62,6 @@ public class WelcomeUI {
             }
         });
         
-        // Container for all controls
         VBox controls = new VBox(20);
         controls.setAlignment(Pos.CENTER);
         controls.getChildren().addAll(titleLabel, createRoomButton, new Label("- OR -"), roomIdBox, joinRoomButton);
@@ -112,7 +105,6 @@ public class WelcomeUI {
                 String readOnlyRoomId = response.getString("readOnlyRoomId");
                 boolean canEdit = response.has("canEdit") && response.getBoolean("canEdit");
                 
-                // Set room info in controller and switch to editor
                 controller.setRoomInfo(editRoomId, readOnlyRoomId, canEdit);
                 launchEditor();
             } else {
@@ -125,27 +117,20 @@ public class WelcomeUI {
         }
     }
     
-    /**
-     * Creates and switches to the editor UI
-     */
+    
     private void launchEditor() {
-        // Create editor UI
         EditorUI editorUI = new EditorUI(primaryStage, controller);
         
-        // Set the scene
         Scene editorScene = new Scene(editorUI.getRoot(), 900, 600);
         primaryStage.setScene(editorScene);
         
-        // Set title based on edit permissions
         String mode = controller.canEdit() ? "Edit" : "Read-Only";
         primaryStage.setTitle("Collaborative Editor - " + mode + " Mode");
         
-        // Initialize editor with the active room ID
         controller.connectToDocument(controller.getReadOnlyRoomId());
     }
     
     private void showError(String message) {
-        // Simple error handling - in a real app you might use an alert dialog
         System.err.println(message);
     }
     

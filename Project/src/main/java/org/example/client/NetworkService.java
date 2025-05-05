@@ -26,7 +26,7 @@ public class NetworkService {
     private final EditorController controller;
     private final DocumentState documentState;
     private static final HttpClient httpClient = HttpClient.newHttpClient();
-    private static String baseUrl = "http://localhost:8080"; //change to server IP on discussion
+    private static String baseUrl = "http://192.168.1.185:8080"; //change to server IP on discussion
 
     public NetworkService(EditorController controller) {
         this.controller = controller;
@@ -79,7 +79,7 @@ public class NetworkService {
         WebSocketStompClient stompClient = new WebSocketStompClient(new SockJsClient(transports));
         stompClient.setMessageConverter(new MappingJackson2MessageConverter());
 
-        stompClient.connectAsync("ws://localhost:8080/ws", new StompSessionHandlerAdapter() {
+        stompClient.connectAsync("ws://192.168.1.185:8080/ws", new StompSessionHandlerAdapter() {
             @Override
             public void afterConnected(StompSession session, StompHeaders connectedHeaders) {
                 stompSession = session;
